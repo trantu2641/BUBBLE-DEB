@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: macos-14
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,47 +20,117 @@ jobs:
       - name: Install iPhoneOS SDK
         run: |
           mkdir -p "$HOME/theos/sdks"
-          curl -L --fail --retry 3 -o /tmp/sdk.tar.lzma \
+
+          curl -L --fail --retry 3 \
+            -o /tmp/sdk.tar.lzma \
             https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.lzma
+
           tar -xJf /tmp/sdk.tar.lzma -C "$HOME/theos/sdks"
 
       - name: Install roothide toolchain
         run: |
-          git clone --depth=1 https://github.com/roothide/theos.git /tmp/roothide-theos || true
-          if [ -d /tmp/roothide-theos/toolchain ]; then
+          git clone --depth=1 \
+            https://github.com/roothide/theos.git \
+            /tmp/roothide-theos || true
+
+          if [ -d "/tmp/roothide-theos/toolchain" ]; then
             cp -R /tmp/roothide-theos/toolchain "$HOME/theos/"
           fi
 
       - name: Build orientation fix
         run: |
           export THEOS="$HOME/theos"
+
           make clean || true
           make package FINALPACKAGE=1
 
       - name: Assemble BubbleMe package
         run: |
           set -e
+
           PKGROOT="$RUNNER_TEMP/bubbleme-pkg"
+
           rm -rf "$PKGROOT"
-          mkdir -p "$PKGROOT/Library/MobileSubstrate/DynamicLibraries"
-          mkdir -p "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle"
-          mkdir -p "$PKGROOT/Library/PreferenceLoader/Preferences"
 
-          cp package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
-          cp package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.plist "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
-          cp -R package/Library/PreferenceBundles/BubbleMePrefs.bundle/. "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle/"
-          cp package/Library/PreferenceLoader/Preferences/BubbleMePrefs.plist "$PKGROOT/Library/PreferenceLoader/Preferences/"
+          mkdir -p \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries"
 
-          FIX_DEB=$(find packages -name '*BubbleMeOrientationFix*.deb' | head -1)
-          if [ -z "$FIX_DEB" ]; then echo 'orientation fix DEB not found'; exit 1; fi
+          mkdir -p \
+            "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle"
+
+          mkdir -p \
+            "$PKGROOT/Library/PreferenceLoader/Preferences"
+
+          echo "Copying original BubbleMe files..."
+
+          cp \
+            package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
+
+          cp \
+            package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.plist \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
+
+          cp -R \
+            package/Library/PreferenceBundles/BubbleMePrefs.bundle/. \
+            "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle/"
+
+          cp \
+            package/Library/PreferenceLoader/Preferences/BubbleMePrefs.plist \
+            "$PKGROOT/Library/PreferenceLoader/Preferences/"
+
+          echo "Finding orientation-fix package..."
+
+          FIX_DEB=$(find packages -type f \
+            -name '*BubbleMeOrientationFix*.deb' \
+            | head -1)
+
+          if [ -z "$FIX_DEB" ]; then
+            echo "ERROR: BubbleMeOrientationFix DEB not found"
+            echo "Contents of packages:"
+            find packages -maxdepth 3 -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Found: $FIX_DEB"
+
           mkdir -p "$RUNNER_TEMP/fix"
-          ar -x "$FIX_DEB" --output "$RUNNER_TEMP/fix"
           mkdir -p "$RUNNER_TEMP/fixdata"
-          tar -xf "$RUNNER_TEMP/fix/data.tar."* -C "$RUNNER_TEMP/fixdata"
-          cp "$RUNNER_TEMP/fixdata/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib" "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
-          cp RootHide.plist "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist"
+
+          ar -x "$FIX_DEB" --output "$RUNNER_TEMP/fix"
+
+          DATA_TAR=$(find "$RUNNER_TEMP/fix" \
+            -maxdepth 1 \
+            -name 'data.tar.*' \
+            | head -1)
+
+          if [ -z "$DATA_TAR" ]; then
+            echo "ERROR: data archive not found"
+            exit 1
+          fi
+
+          tar -xf "$DATA_TAR" -C "$RUNNER_TEMP/fixdata"
+
+          FIX_DYLIB="$RUNNER_TEMP/fixdata/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib"
+
+          if [ ! -f "$FIX_DYLIB" ]; then
+            echo "ERROR: BubbleMeOrientationFix.dylib not found"
+            find "$RUNNER_TEMP/fixdata" -type f
+            exit 1
+          fi
+
+          cp \
+            "$FIX_DYLIB" \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/"
+
+          cp \
+            RootHide.plist \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist"
+
+          echo "Creating Debian control..."
 
           mkdir -p "$RUNNER_TEMP/control"
+
           cat > "$RUNNER_TEMP/control/control" <<'CTL'
 Package: com.dth.bubbleme
 Name: BubbleMe
@@ -72,22 +143,80 @@ Architecture: iphoneos-arm64e
 Version: 0.0.2-alpha-1+roothide-orientation1
 Installed-Size: 1200
 CTL
+
           echo '2.0' > "$RUNNER_TEMP/control/debian-binary"
-          tar -C "$RUNNER_TEMP/control" -czf "$RUNNER_TEMP/control.tar.gz" control
-          tar -C "$PKGROOT" -czf "$RUNNER_TEMP/data.tar.gz" .
-          ar -cr "BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb" "$RUNNER_TEMP/control.tar.gz" "$RUNNER_TEMP/data.tar.gz" "$RUNNER_TEMP/control/debian-binary"
+
+          tar \
+            -C "$RUNNER_TEMP/control" \
+            -czf "$RUNNER_TEMP/control.tar.gz" \
+            control
+
+          tar \
+            -C "$PKGROOT" \
+            -czf "$RUNNER_TEMP/data.tar.gz" \
+            .
+
+          ar -cr \
+            "BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb" \
+            "$RUNNER_TEMP/debian-binary" \
+            "$RUNNER_TEMP/control.tar.gz" \
+            "$RUNNER_TEMP/data.tar.gz"
+
+          echo "Package created:"
+          ls -lh BubbleMe-*.deb
 
       - name: Validate output
         run: |
+          set -e
+
+          echo "=== DEB ==="
           file BubbleMe-*.deb
+
+          echo "=== AR CONTENTS ==="
           ar t BubbleMe-*.deb
+
+          rm -rf /tmp/check
           mkdir -p /tmp/check
-          ar -x BubbleMe-*.deb --output /tmp/check
-          tar -tzf /tmp/check/data.tar.gz | grep -E 'BubbleMe(dylib|OrientationFix.dylib|\.plist)' || true
-          file package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+
+          ar -x \
+            BubbleMe-*.deb \
+            --output /tmp/check
+
+          echo "=== DATA CONTENTS ==="
+
+          DATA_TAR=$(find /tmp/check \
+            -maxdepth 1 \
+            -name 'data.tar.*' \
+            | head -1)
+
+          tar -tzf "$DATA_TAR"
+
+          echo "=== ORIGINAL DYLIB ==="
+
+          file \
+            package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+
+          echo "=== FINAL DYLIBS ==="
+
+          tar -xzf "$DATA_TAR" \
+            -C /tmp/check
+
+          file \
+            /tmp/check/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+
+          file \
+            /tmp/check/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib
+
+          echo "=== FINAL PLISTS ==="
+
+          ls -l \
+            /tmp/check/Library/MobileSubstrate/DynamicLibraries/
+
+          echo "=== VALIDATION COMPLETE ==="
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
           name: BubbleMe-orientation-fix
           path: BubbleMe-*.deb
+          if-no-files-found: error
