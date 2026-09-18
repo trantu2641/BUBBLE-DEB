@@ -24,7 +24,6 @@ jobs:
             -o /tmp/sdk.tar.lzma \
             https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.lzma
           tar -xJf /tmp/sdk.tar.lzma -C "$HOME/theos/sdks"
-
       - name: Install roothide toolchain
         run: |
           git clone --depth=1 \
