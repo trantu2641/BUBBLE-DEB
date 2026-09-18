@@ -19,11 +19,35 @@ jobs:
 
       - name: Install iPhoneOS SDK
         run: |
+          set -e
+
           mkdir -p "$HOME/theos/sdks"
-          curl -L --fail --retry 3 \
-            -o /tmp/sdk.tar.lzma \
-            https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.lzma
-          tar -xJf /tmp/sdk.tar.lzma -C "$HOME/theos/sdks"
+
+          rm -rf /tmp/theos-sdks
+
+          git clone \
+            --depth=1 \
+            --filter=blob:none \
+            --sparse \
+            https://github.com/theos/sdks.git \
+            /tmp/theos-sdks
+
+          cd /tmp/theos-sdks
+
+          git sparse-checkout set iPhoneOS16.5.sdk
+
+          if [ ! -d "iPhoneOS16.5.sdk" ]; then
+            echo "ERROR: iPhoneOS16.5.sdk was not found"
+            find . -maxdepth 2 -type d
+            exit 1
+          fi
+
+          cp -R \
+            iPhoneOS16.5.sdk \
+            "$HOME/theos/sdks/"
+
+          echo "Installed SDK:"
+          ls -ld "$HOME/theos/sdks/iPhoneOS16.5.sdk"
       - name: Install roothide toolchain
         run: |
           git clone --depth=1 \
