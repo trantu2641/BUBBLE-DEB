@@ -2,37 +2,27 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-#pragma mark - Safety
+static IMP BMOriginalSetFrame = NULL;
+static IMP BMOriginalSetBounds = NULL;
 
 static BOOL BMValidWindow(UIWindow *window)
 {
-    if (window == nil) {
+    if (window == nil)
         return NO;
-    }
 
-    UIWindowScene *scene = window.windowScene;
-
-    if (scene == nil) {
+    if (window.windowScene == nil)
         return NO;
-    }
 
-    CGRect bounds = window.bounds;
+    CGRect b = window.bounds;
 
-    if (bounds.size.width <= 0.0 ||
-        bounds.size.height <= 0.0) {
-        return NO;
-    }
-
-    return YES;
+    return b.size.width > 0.0 &&
+           b.size.height > 0.0;
 }
-
-#pragma mark - Safe relayout
 
 static void BMRelayoutWindow(UIWindow *window)
 {
-    if (!BMValidWindow(window)) {
+    if (!BMValidWindow(window))
         return;
-    }
 
     @try {
 
@@ -54,61 +44,43 @@ static void BMRelayoutWindow(UIWindow *window)
 
     }
     @catch (__unused NSException *exception) {
-        /*
-         * Never allow an exception to escape into SpringBoard.
-         */
     }
 }
 
-#pragma mark - Relayout all windows
-
 static void BMRelayoutAllWindows(void)
 {
-    UIApplication *application =
+    UIApplication *app =
         UIApplication.sharedApplication;
 
-    if (application == nil) {
+    if (app == nil)
         return;
-    }
 
     @try {
 
         NSSet<UIScene *> *scenes =
-            application.connectedScenes;
+            app.connectedScenes;
 
         for (UIScene *scene in scenes) {
 
-            if (![scene isKindOfClass:[UIWindowScene class]]) {
+            if (![scene isKindOfClass:[UIWindowScene class]])
                 continue;
-            }
 
             UIWindowScene *windowScene =
                 (UIWindowScene *)scene;
 
-            UISceneActivationState state =
-                windowScene.activationState;
-
-            if (state == UISceneActivationStateUnattached) {
+            if (windowScene.activationState ==
+                UISceneActivationStateUnattached)
                 continue;
-            }
 
-            NSArray<UIWindow *> *windows =
-                windowScene.windows;
-
-            for (UIWindow *window in windows) {
+            for (UIWindow *window in windowScene.windows) {
                 BMRelayoutWindow(window);
             }
         }
 
     }
     @catch (__unused NSException *exception) {
-        /*
-         * Fail safe.
-         */
     }
 }
-
-#pragma mark - Delayed relayout
 
 static void BMScheduleRelayout(void)
 {
@@ -118,94 +90,65 @@ static void BMScheduleRelayout(void)
 
             BMRelayoutAllWindows();
 
-            /*
-             * BubbleMe may update its hierarchy
-             * one run-loop after UIKit.
-             */
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-
-                @autoreleasepool {
-                    BMRelayoutAllWindows();
+            dispatch_async(
+                dispatch_get_main_queue(),
+                ^{
+                    @autoreleasepool {
+                        BMRelayoutAllWindows();
+                    }
                 }
-
-            });
+            );
         }
-
     });
 }
 
-#pragma mark - UIWindow swizzling
-
-static void BM_original_setFrame(
+static void BMSetFrame(
     UIWindow *self,
-    SEL _cmd,
+    SEL selector,
     CGRect frame
 )
 {
-    /*
-     * This function is replaced at runtime.
-     * The original implementation is installed
-     * as BM_original_setFrame.
-     */
-}
+    if (BMOriginalSetFrame != NULL) {
 
-static void BM_swizzled_setFrame(
-    UIWindow *self,
-    SEL _cmd,
-    CGRect frame
-)
-{
-    /*
-     * The original implementation is invoked
-     * through the IMP stored below.
-     */
-
-    static void (*original)(id, SEL, CGRect) = NULL;
-
-    if (original != NULL) {
-        original(self, _cmd, frame);
+        ((void (*)(id, SEL, CGRect))
+            BMOriginalSetFrame)(
+                self,
+                selector,
+                frame
+            );
     }
 
-    if (self.windowScene != nil) {
+    if (self.windowScene != nil)
         BMScheduleRelayout();
-    }
 }
 
-#pragma mark - UIWindow bounds swizzling
-
-static void BM_swizzled_setBounds(
+static void BMSetBounds(
     UIWindow *self,
-    SEL _cmd,
+    SEL selector,
     CGRect bounds
 )
 {
-    static void (*original)(id, SEL, CGRect) = NULL;
+    if (BMOriginalSetBounds != NULL) {
 
-    if (original != NULL) {
-        original(self, _cmd, bounds);
+        ((void (*)(id, SEL, CGRect))
+            BMOriginalSetBounds)(
+                self,
+                selector,
+                bounds
+            );
     }
 
-    if (self.windowScene != nil) {
+    if (self.windowScene != nil)
         BMScheduleRelayout();
-    }
 }
 
-#pragma mark - Runtime swizzle helper
-
-static BOOL BMSwizzleMethod(
+static void BMSwizzle(
     Class cls,
     SEL originalSelector,
     SEL replacementSelector,
     IMP *originalIMP
 )
 {
-    if (cls == Nil ||
-        originalSelector == NULL ||
-        replacementSelector == NULL) {
-        return NO;
-    }
-
     Method originalMethod =
         class_getInstanceMethod(
             cls,
@@ -219,81 +162,26 @@ static BOOL BMSwizzleMethod(
         );
 
     if (originalMethod == NULL ||
-        replacementMethod == NULL) {
-        return NO;
-    }
+        replacementMethod == NULL)
+        return;
 
-    IMP original =
-        method_getImplementation(originalMethod);
-
-    if (originalIMP != NULL) {
-        *originalIMP = original;
-    }
+    if (originalIMP != NULL)
+        *originalIMP =
+            method_getImplementation(originalMethod);
 
     method_exchangeImplementations(
         originalMethod,
         replacementMethod
     );
-
-    return YES;
 }
 
-#pragma mark - Correct swizzled implementations
-
-static IMP BMOriginalSetFrame = NULL;
-static IMP BMOriginalSetBounds = NULL;
-
-static void BM_SetFrame(
-    UIWindow *self,
-    SEL _cmd,
-    CGRect frame
-)
+static void BMInstallHooks(void)
 {
-    if (BMOriginalSetFrame != NULL) {
+    Class windowClass =
+        objc_getClass("UIWindow");
 
-        ((void (*)(id, SEL, CGRect))
-            BMOriginalSetFrame)(
-                self,
-                _cmd,
-                frame
-            );
-    }
-
-    if (self.windowScene != nil) {
-        BMScheduleRelayout();
-    }
-}
-
-static void BM_SetBounds(
-    UIWindow *self,
-    SEL _cmd,
-    CGRect bounds
-)
-{
-    if (BMOriginalSetBounds != NULL) {
-
-        ((void (*)(id, SEL, CGRect))
-            BMOriginalSetBounds)(
-                self,
-                _cmd,
-                bounds
-            );
-    }
-
-    if (self.windowScene != nil) {
-        BMScheduleRelayout();
-    }
-}
-
-#pragma mark - Install UIWindow hooks
-
-static void BMInstallWindowHooks(void)
-{
-    Class windowClass = objc_getClass("UIWindow");
-
-    if (windowClass == Nil) {
+    if (windowClass == Nil)
         return;
-    }
 
     Method frameMethod =
         class_getInstanceMethod(
@@ -301,140 +189,102 @@ static void BMInstallWindowHooks(void)
             @selector(setFrame:)
         );
 
+    if (frameMethod != NULL) {
+
+        class_addMethod(
+            windowClass,
+            @selector(bm_orientationFix_setFrame:),
+            (IMP)BMSetFrame,
+            method_getTypeEncoding(frameMethod)
+        );
+
+        BMSwizzle(
+            windowClass,
+            @selector(setFrame:),
+            @selector(bm_orientationFix_setFrame:),
+            &BMOriginalSetFrame
+        );
+    }
+
     Method boundsMethod =
         class_getInstanceMethod(
             windowClass,
             @selector(setBounds:)
         );
 
-    if (frameMethod != NULL) {
-
-        SEL selector =
-            @selector(bm_orientationFix_setFrame:);
-
-        class_addMethod(
-            windowClass,
-            selector,
-            (IMP)BM_SetFrame,
-            method_getTypeEncoding(frameMethod)
-        );
-
-        BMSwizzleMethod(
-            windowClass,
-            @selector(setFrame:),
-            selector,
-            &BMOriginalSetFrame
-        );
-    }
-
     if (boundsMethod != NULL) {
 
-        SEL selector =
-            @selector(bm_orientationFix_setBounds:);
-
         class_addMethod(
             windowClass,
-            selector,
-            (IMP)BM_SetBounds,
+            @selector(bm_orientationFix_setBounds:),
+            (IMP)BMSetBounds,
             method_getTypeEncoding(boundsMethod)
         );
 
-        BMSwizzleMethod(
+        BMSwizzle(
             windowClass,
             @selector(setBounds:),
-            selector,
+            @selector(bm_orientationFix_setBounds:),
             &BMOriginalSetBounds
         );
     }
 }
 
-#pragma mark - Notifications
-
-static void BMOrientationNotification(
-    NSNotification *notification
+static void BMOrientationChanged(
+    __unused NSNotification *notification
 )
 {
-    (void)notification;
-
     BMScheduleRelayout();
 }
-
-#pragma mark - Constructor
 
 __attribute__((constructor))
 static void BubbleMeOrientationFixInit(void)
 {
     @autoreleasepool {
 
-        /*
-         * Safety:
-         * only run inside SpringBoard.
-         */
-
         NSString *bundleIdentifier =
             NSBundle.mainBundle.bundleIdentifier;
 
         if (![bundleIdentifier
-              isEqualToString:@"com.apple.springboard"]) {
+              isEqualToString:@"com.apple.springboard"])
             return;
-        }
 
-        /*
-         * Install runtime hooks.
-         */
-
-        BMInstallWindowHooks();
-
-        /*
-         * Observe device orientation.
-         */
+        BMInstallHooks();
 
         NSNotificationCenter *center =
             NSNotificationCenter.defaultCenter;
 
-        if (center == nil) {
+        if (center == nil)
             return;
-        }
 
         [center addObserverForName:
                     UIDeviceOrientationDidChangeNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(
-                        __unused NSNotification *note
-                    ) {
+                    usingBlock:
+            ^(__unused NSNotification *note) {
 
-            BMOrientationNotification(note);
+            BMOrientationChanged(note);
         }];
-
-        /*
-         * Observe scene activation.
-         */
 
         [center addObserverForName:
                     UISceneDidActivateNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(
-                        __unused NSNotification *note
-                    ) {
+                    usingBlock:
+            ^(__unused NSNotification *note) {
 
-            BMOrientationNotification(note);
+            BMOrientationChanged(note);
         }];
-
-        /*
-         * Observe windows becoming visible.
-         */
 
         [center addObserverForName:
                     UIWindowDidBecomeVisibleNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(
-                        __unused NSNotification *note
-                    ) {
+                    usingBlock:
+            ^(__unused NSNotification *note) {
 
-            BMOrientationNotification(note);
+            BMOrientationChanged(note);
         }];
     }
 }
