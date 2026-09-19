@@ -1,9 +1,10 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 #pragma mark - Safety
 
-static BOOL BMIsValidWindow(UIWindow *window)
+static BOOL BMValidWindow(UIWindow *window)
 {
     if (window == nil) {
         return NO;
@@ -17,7 +18,8 @@ static BOOL BMIsValidWindow(UIWindow *window)
 
     CGRect bounds = window.bounds;
 
-    if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0) {
+    if (bounds.size.width <= 0.0 ||
+        bounds.size.height <= 0.0) {
         return NO;
     }
 
@@ -28,7 +30,7 @@ static BOOL BMIsValidWindow(UIWindow *window)
 
 static void BMRelayoutWindow(UIWindow *window)
 {
-    if (!BMIsValidWindow(window)) {
+    if (!BMValidWindow(window)) {
         return;
     }
 
@@ -37,32 +39,33 @@ static void BMRelayoutWindow(UIWindow *window)
         [window setNeedsLayout];
         [window layoutIfNeeded];
 
-        UIViewController *rootViewController = window.rootViewController;
+        UIViewController *root =
+            window.rootViewController;
 
-        if (rootViewController != nil) {
+        if (root != nil) {
 
-            UIView *rootView = rootViewController.view;
+            UIView *view = root.view;
 
-            if (rootView != nil) {
-                [rootView setNeedsLayout];
-                [rootView layoutIfNeeded];
+            if (view != nil) {
+                [view setNeedsLayout];
+                [view layoutIfNeeded];
             }
         }
 
     }
     @catch (__unused NSException *exception) {
         /*
-         * Safety:
-         * never allow an exception to escape into SpringBoard.
+         * Never allow an exception to escape into SpringBoard.
          */
     }
 }
 
-#pragma mark - Relayout all active scenes
+#pragma mark - Relayout all windows
 
 static void BMRelayoutAllWindows(void)
 {
-    UIApplication *application = UIApplication.sharedApplication;
+    UIApplication *application =
+        UIApplication.sharedApplication;
 
     if (application == nil) {
         return;
@@ -70,17 +73,10 @@ static void BMRelayoutAllWindows(void)
 
     @try {
 
-        /*
-         * Do NOT use application.windows.
-         *
-         * iOS 15+:
-         * enumerate connected UIWindowScene objects instead.
-         */
-
-        NSSet<UIScene *> *connectedScenes =
+        NSSet<UIScene *> *scenes =
             application.connectedScenes;
 
-        for (UIScene *scene in connectedScenes) {
+        for (UIScene *scene in scenes) {
 
             if (![scene isKindOfClass:[UIWindowScene class]]) {
                 continue;
@@ -89,8 +85,10 @@ static void BMRelayoutAllWindows(void)
             UIWindowScene *windowScene =
                 (UIWindowScene *)scene;
 
-            if (windowScene.activationState ==
-                UISceneActivationStateUnattached) {
+            UISceneActivationState state =
+                windowScene.activationState;
+
+            if (state == UISceneActivationStateUnattached) {
                 continue;
             }
 
@@ -98,11 +96,6 @@ static void BMRelayoutAllWindows(void)
                 windowScene.windows;
 
             for (UIWindow *window in windows) {
-
-                if (!BMIsValidWindow(window)) {
-                    continue;
-                }
-
                 BMRelayoutWindow(window);
             }
         }
@@ -115,139 +108,286 @@ static void BMRelayoutAllWindows(void)
     }
 }
 
-#pragma mark - Orientation notification
+#pragma mark - Delayed relayout
 
-static void BMOrientationChanged(void)
+static void BMScheduleRelayout(void)
 {
-    /*
-     * Wait until UIKit has finished updating
-     * the scene geometry before relayout.
-     */
-
     dispatch_async(dispatch_get_main_queue(), ^{
+
         @autoreleasepool {
 
             BMRelayoutAllWindows();
 
             /*
-             * A second layout pass is useful because
-             * BubbleMe may update its own hierarchy
-             * one run-loop later.
+             * BubbleMe may update its hierarchy
+             * one run-loop after UIKit.
              */
 
             dispatch_async(dispatch_get_main_queue(), ^{
+
                 @autoreleasepool {
                     BMRelayoutAllWindows();
                 }
+
             });
         }
+
     });
 }
 
-#pragma mark - UIWindow hook
+#pragma mark - UIWindow swizzling
 
-%hook UIWindow
-
-- (void)setBounds:(CGRect)bounds
+static void BM_original_setFrame(
+    UIWindow *self,
+    SEL _cmd,
+    CGRect frame
+)
 {
-    %orig;
-
-    if (self.windowScene == nil) {
-        return;
-    }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            BMRelayoutWindow(self);
-        }
-    });
-}
-
-- (void)setFrame:(CGRect)frame
-{
-    %orig;
-
-    if (self.windowScene == nil) {
-        return;
-    }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            BMRelayoutWindow(self);
-        }
-    });
-}
-
-%end
-
-#pragma mark - UIWindowScene hook
-
-%hook UIWindowScene
-
-- (void)setGeometry:(id)geometry
-{
-    %orig;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-
-            UIWindowScene *scene = self;
-
-            if (scene == nil) {
-                return;
-            }
-
-            NSArray<UIWindow *> *windows =
-                scene.windows;
-
-            for (UIWindow *window in windows) {
-                BMRelayoutWindow(window);
-            }
-        }
-    });
-}
-
-%end
-
-#pragma mark - UIApplicationDelegate style orientation notification
-
-%hook UIDevice
-
-- (void)setOrientation:(UIDeviceOrientation)orientation
-{
-    %orig;
-
     /*
-     * IMPORTANT:
-     *
-     * We do NOT change the orientation here.
-     * We only observe the change and ask UIKit
-     * to perform another layout pass.
+     * This function is replaced at runtime.
+     * The original implementation is installed
+     * as BM_original_setFrame.
+     */
+}
+
+static void BM_swizzled_setFrame(
+    UIWindow *self,
+    SEL _cmd,
+    CGRect frame
+)
+{
+    /*
+     * The original implementation is invoked
+     * through the IMP stored below.
      */
 
-    BMOrientationChanged();
+    static void (*original)(id, SEL, CGRect) = NULL;
+
+    if (original != NULL) {
+        original(self, _cmd, frame);
+    }
+
+    if (self.windowScene != nil) {
+        BMScheduleRelayout();
+    }
 }
 
-%end
+#pragma mark - UIWindow bounds swizzling
+
+static void BM_swizzled_setBounds(
+    UIWindow *self,
+    SEL _cmd,
+    CGRect bounds
+)
+{
+    static void (*original)(id, SEL, CGRect) = NULL;
+
+    if (original != NULL) {
+        original(self, _cmd, bounds);
+    }
+
+    if (self.windowScene != nil) {
+        BMScheduleRelayout();
+    }
+}
+
+#pragma mark - Runtime swizzle helper
+
+static BOOL BMSwizzleMethod(
+    Class cls,
+    SEL originalSelector,
+    SEL replacementSelector,
+    IMP *originalIMP
+)
+{
+    if (cls == Nil ||
+        originalSelector == NULL ||
+        replacementSelector == NULL) {
+        return NO;
+    }
+
+    Method originalMethod =
+        class_getInstanceMethod(
+            cls,
+            originalSelector
+        );
+
+    Method replacementMethod =
+        class_getInstanceMethod(
+            cls,
+            replacementSelector
+        );
+
+    if (originalMethod == NULL ||
+        replacementMethod == NULL) {
+        return NO;
+    }
+
+    IMP original =
+        method_getImplementation(originalMethod);
+
+    if (originalIMP != NULL) {
+        *originalIMP = original;
+    }
+
+    method_exchangeImplementations(
+        originalMethod,
+        replacementMethod
+    );
+
+    return YES;
+}
+
+#pragma mark - Correct swizzled implementations
+
+static IMP BMOriginalSetFrame = NULL;
+static IMP BMOriginalSetBounds = NULL;
+
+static void BM_SetFrame(
+    UIWindow *self,
+    SEL _cmd,
+    CGRect frame
+)
+{
+    if (BMOriginalSetFrame != NULL) {
+
+        ((void (*)(id, SEL, CGRect))
+            BMOriginalSetFrame)(
+                self,
+                _cmd,
+                frame
+            );
+    }
+
+    if (self.windowScene != nil) {
+        BMScheduleRelayout();
+    }
+}
+
+static void BM_SetBounds(
+    UIWindow *self,
+    SEL _cmd,
+    CGRect bounds
+)
+{
+    if (BMOriginalSetBounds != NULL) {
+
+        ((void (*)(id, SEL, CGRect))
+            BMOriginalSetBounds)(
+                self,
+                _cmd,
+                bounds
+            );
+    }
+
+    if (self.windowScene != nil) {
+        BMScheduleRelayout();
+    }
+}
+
+#pragma mark - Install UIWindow hooks
+
+static void BMInstallWindowHooks(void)
+{
+    Class windowClass = objc_getClass("UIWindow");
+
+    if (windowClass == Nil) {
+        return;
+    }
+
+    Method frameMethod =
+        class_getInstanceMethod(
+            windowClass,
+            @selector(setFrame:)
+        );
+
+    Method boundsMethod =
+        class_getInstanceMethod(
+            windowClass,
+            @selector(setBounds:)
+        );
+
+    if (frameMethod != NULL) {
+
+        SEL selector =
+            @selector(bm_orientationFix_setFrame:);
+
+        class_addMethod(
+            windowClass,
+            selector,
+            (IMP)BM_SetFrame,
+            method_getTypeEncoding(frameMethod)
+        );
+
+        BMSwizzleMethod(
+            windowClass,
+            @selector(setFrame:),
+            selector,
+            &BMOriginalSetFrame
+        );
+    }
+
+    if (boundsMethod != NULL) {
+
+        SEL selector =
+            @selector(bm_orientationFix_setBounds:);
+
+        class_addMethod(
+            windowClass,
+            selector,
+            (IMP)BM_SetBounds,
+            method_getTypeEncoding(boundsMethod)
+        );
+
+        BMSwizzleMethod(
+            windowClass,
+            @selector(setBounds:),
+            selector,
+            &BMOriginalSetBounds
+        );
+    }
+}
+
+#pragma mark - Notifications
+
+static void BMOrientationNotification(
+    NSNotification *notification
+)
+{
+    (void)notification;
+
+    BMScheduleRelayout();
+}
 
 #pragma mark - Constructor
 
-%ctor
+__attribute__((constructor))
+static void BubbleMeOrientationFixInit(void)
 {
     @autoreleasepool {
 
+        /*
+         * Safety:
+         * only run inside SpringBoard.
+         */
+
         NSString *bundleIdentifier =
             NSBundle.mainBundle.bundleIdentifier;
-
-        /*
-         * Safety guard:
-         * this dylib should only operate inside SpringBoard.
-         */
 
         if (![bundleIdentifier
               isEqualToString:@"com.apple.springboard"]) {
             return;
         }
+
+        /*
+         * Install runtime hooks.
+         */
+
+        BMInstallWindowHooks();
+
+        /*
+         * Observe device orientation.
+         */
 
         NSNotificationCenter *center =
             NSNotificationCenter.defaultCenter;
@@ -256,39 +396,45 @@ static void BMOrientationChanged(void)
             return;
         }
 
-        /*
-         * Device orientation.
-         */
-
         [center addObserverForName:
                     UIDeviceOrientationDidChangeNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(
+                        __unused NSNotification *note
+                    ) {
 
-            BMOrientationChanged();
+            BMOrientationNotification(note);
         }];
 
         /*
-         * Scene activation / geometry changes.
+         * Observe scene activation.
          */
 
         [center addObserverForName:
                     UISceneDidActivateNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(
+                        __unused NSNotification *note
+                    ) {
 
-            BMOrientationChanged();
+            BMOrientationNotification(note);
         }];
+
+        /*
+         * Observe windows becoming visible.
+         */
 
         [center addObserverForName:
                     UIWindowDidBecomeVisibleNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *notification) {
+                    usingBlock:^(
+                        __unused NSNotification *note
+                    ) {
 
-            BMOrientationChanged();
+            BMOrientationNotification(note);
         }];
     }
 }
