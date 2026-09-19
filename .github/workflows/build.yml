@@ -48,19 +48,50 @@ jobs:
 
           echo "Installed SDK:"
           ls -ld "$HOME/theos/sdks/iPhoneOS16.5.sdk"
+
       - name: Install roothide toolchain
         run: |
-          git clone --depth=1 \
+          set -e
+
+          rm -rf /tmp/roothide-theos
+
+          git clone \
+            --depth=1 \
             https://github.com/roothide/theos.git \
-            /tmp/roothide-theos || true
+            /tmp/roothide-theos
 
           if [ -d "/tmp/roothide-theos/toolchain" ]; then
-            cp -R /tmp/roothide-theos/toolchain "$HOME/theos/"
+            cp -R \
+              /tmp/roothide-theos/toolchain \
+              "$HOME/theos/"
+          else
+            echo "ERROR: roothide toolchain not found"
+            exit 1
           fi
+
+      - name: Verify Theos
+        run: |
+          set -e
+
+          export THEOS="$HOME/theos"
+
+          echo "=== THEOS ==="
+          echo "$THEOS"
+
+          echo "=== SDK ==="
+          ls -ld "$THEOS/sdks/iPhoneOS16.5.sdk"
+
+          echo "=== TOOLCHAIN ==="
+          find "$THEOS/toolchain" -maxdepth 3 -type f \
+            \( -name clang -o -name clang++ \) \
+            -print
 
       - name: Build orientation fix
         run: |
+          set -e
+
           export THEOS="$HOME/theos"
+
           make clean || true
           make package FINALPACKAGE=1
 
@@ -72,11 +103,16 @@ jobs:
 
           rm -rf "$PKGROOT"
 
-          mkdir -p "$PKGROOT/Library/MobileSubstrate/DynamicLibraries"
-          mkdir -p "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle"
-          mkdir -p "$PKGROOT/Library/PreferenceLoader/Preferences"
+          mkdir -p \
+            "$PKGROOT/Library/MobileSubstrate/DynamicLibraries"
 
-          echo "Copying original BubbleMe..."
+          mkdir -p \
+            "$PKGROOT/Library/PreferenceBundles/BubbleMePrefs.bundle"
+
+          mkdir -p \
+            "$PKGROOT/Library/PreferenceLoader/Preferences"
+
+          echo "=== Copy original BubbleMe ==="
 
           cp \
             package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib \
@@ -94,17 +130,22 @@ jobs:
             package/Library/PreferenceLoader/Preferences/BubbleMePrefs.plist \
             "$PKGROOT/Library/PreferenceLoader/Preferences/"
 
-          echo "Finding orientation fix..."
+          echo "=== Find orientation fix DEB ==="
 
-          FIX_DEB=$(find packages -type f -name '*BubbleMeOrientationFix*.deb' | head -1)
+          FIX_DEB=$(find packages \
+            -type f \
+            -name '*BubbleMeOrientationFix*.deb' \
+            | head -1)
 
           if [ -z "$FIX_DEB" ]; then
-            echo "ERROR: orientation fix DEB not found"
+            echo "ERROR: BubbleMeOrientationFix DEB not found"
+            echo "=== packages ==="
             find packages -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "Found: $FIX_DEB"
+          echo "Found:"
+          echo "$FIX_DEB"
 
           rm -rf "$RUNNER_TEMP/fix"
           rm -rf "$RUNNER_TEMP/fixdata"
@@ -112,22 +153,32 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fix"
           mkdir -p "$RUNNER_TEMP/fixdata"
 
-          ar -x "$FIX_DEB" --output "$RUNNER_TEMP/fix"
+          ar -x "$FIX_DEB" \
+            --output "$RUNNER_TEMP/fix"
 
-          DATA_TAR=$(find "$RUNNER_TEMP/fix" -name 'data.tar.*' | head -1)
+          DATA_TAR=$(find "$RUNNER_TEMP/fix" \
+            -name 'data.tar.*' \
+            | head -1)
 
           if [ -z "$DATA_TAR" ]; then
             echo "ERROR: data.tar archive not found"
             exit 1
           fi
 
-          tar -xf "$DATA_TAR" -C "$RUNNER_TEMP/fixdata"
+          echo "Data archive:"
+          echo "$DATA_TAR"
+
+          tar -xf "$DATA_TAR" \
+            -C "$RUNNER_TEMP/fixdata"
 
           FIX_DYLIB="$RUNNER_TEMP/fixdata/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib"
 
           if [ ! -f "$FIX_DYLIB" ]; then
             echo "ERROR: BubbleMeOrientationFix.dylib not found"
+
+            echo "=== Extracted files ==="
             find "$RUNNER_TEMP/fixdata" -type f
+
             exit 1
           fi
 
@@ -139,9 +190,11 @@ jobs:
             RootHide.plist \
             "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist"
 
-          echo "Creating control file..."
+          echo "=== Creating control ==="
 
           CONTROL="$RUNNER_TEMP/control"
+
+          rm -rf "$CONTROL"
           mkdir -p "$CONTROL"
 
           printf '%s\n' \
@@ -157,7 +210,8 @@ jobs:
             'Installed-Size: 1200' \
             > "$CONTROL/control"
 
-          echo '2.0' > "$CONTROL/debian-binary"
+          echo '2.0' \
+            > "$CONTROL/debian-binary"
 
           tar \
             -C "$CONTROL" \
@@ -169,7 +223,7 @@ jobs:
             -czf "$RUNNER_TEMP/data.tar.gz" \
             .
 
-          echo "Creating DEB..."
+          echo "=== Creating DEB ==="
 
           ar -cr \
             "BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb" \
@@ -177,46 +231,68 @@ jobs:
             "$RUNNER_TEMP/control.tar.gz" \
             "$RUNNER_TEMP/data.tar.gz"
 
-          ls -lh BubbleMe-*.deb
+          echo "=== DEB CREATED ==="
+
+          ls -lh \
+            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
 
       - name: Validate output
         run: |
           set -e
 
           echo "=== DEB FILE ==="
-          file BubbleMe-*.deb
+
+          file \
+            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
 
           echo "=== DEB MEMBERS ==="
-          ar t BubbleMe-*.deb
+
+          ar t \
+            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
 
           rm -rf /tmp/check
           mkdir -p /tmp/check
 
-          ar -x BubbleMe-*.deb --output /tmp/check
+          ar -x \
+            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb \
+            --output /tmp/check
 
-          DATA_TAR=$(find /tmp/check -name 'data.tar.*' | head -1)
+          DATA_TAR=$(find /tmp/check \
+            -name 'data.tar.*' \
+            | head -1)
 
           echo "=== PACKAGE CONTENTS ==="
+
           tar -tzf "$DATA_TAR"
 
-          echo "=== ORIGINAL BUBBLEME DYLIB ==="
-          file package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+          echo "=== ORIGINAL BUBBLEME ==="
+
+          file \
+            package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+
+          echo "=== EXTRACT FINAL PACKAGE ==="
+
+          rm -rf /tmp/final-package
+          mkdir -p /tmp/final-package
+
+          tar \
+            -xzf "$DATA_TAR" \
+            -C /tmp/final-package
 
           echo "=== FINAL BUBBLEME DYLIB ==="
-          tar -xzf "$DATA_TAR" -C /tmp/check
 
           file \
-            /tmp/check/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+            /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
 
-          echo "=== FINAL ORIENTATION FIX DYLIB ==="
+          echo "=== FINAL ORIENTATION DYLIB ==="
 
           file \
-            /tmp/check/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib
+            /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib
 
           echo "=== DYNAMIC LIBRARIES ==="
 
           ls -lh \
-            /tmp/check/Library/MobileSubstrate/DynamicLibraries/
+            /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/
 
           echo "=== VALIDATION COMPLETE ==="
 
@@ -224,5 +300,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BubbleMe-orientation-fix
-          path: BubbleMe-*.deb
+          path: BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
           if-no-files-found: error
