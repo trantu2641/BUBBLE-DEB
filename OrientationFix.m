@@ -1,15 +1,17 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <Foundation/Foundation.h>
 
 #pragma mark - Safety
 
 static BOOL BMIsValidWindow(UIWindow *window)
 {
-    if (!window) {
+    if (window == nil) {
         return NO;
     }
 
-    if (!window.windowScene) {
+    UIWindowScene *scene = window.windowScene;
+
+    if (scene == nil) {
         return NO;
     }
 
@@ -22,17 +24,6 @@ static BOOL BMIsValidWindow(UIWindow *window)
     return YES;
 }
 
-static BOOL BMIsLandscape(UIWindow *window)
-{
-    if (!BMIsValidWindow(window)) {
-        return NO;
-    }
-
-    CGRect bounds = window.bounds;
-
-    return bounds.size.width > bounds.size.height;
-}
-
 #pragma mark - Safe relayout
 
 static void BMRelayoutWindow(UIWindow *window)
@@ -41,50 +32,70 @@ static void BMRelayoutWindow(UIWindow *window)
         return;
     }
 
-    /*
-     * Do NOT modify:
-     *
-     * - interfaceOrientation
-     * - transform
-     * - frame
-     * - bounds
-     *
-     * We only request a fresh layout.
-     */
-
     @try {
+
         [window setNeedsLayout];
         [window layoutIfNeeded];
 
-        UIViewController *root = window.rootViewController;
+        UIViewController *rootViewController = window.rootViewController;
 
-        if (root) {
-            [root.view setNeedsLayout];
-            [root.view layoutIfNeeded];
+        if (rootViewController != nil) {
+
+            UIView *rootView = rootViewController.view;
+
+            if (rootView != nil) {
+                [rootView setNeedsLayout];
+                [rootView layoutIfNeeded];
+            }
         }
+
     }
     @catch (__unused NSException *exception) {
         /*
-         * Fail safe:
-         * never propagate an exception into SpringBoard.
+         * Safety:
+         * never allow an exception to escape into SpringBoard.
          */
     }
 }
 
-#pragma mark - Orientation notification
+#pragma mark - Relayout all active scenes
 
-static void BMOrientationChanged(NSNotification *notification)
+static void BMRelayoutAllWindows(void)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
+    UIApplication *application = UIApplication.sharedApplication;
 
-            UIApplication *application = UIApplication.sharedApplication;
+    if (application == nil) {
+        return;
+    }
 
-            if (!application) {
-                return;
+    @try {
+
+        /*
+         * Do NOT use application.windows.
+         *
+         * iOS 15+:
+         * enumerate connected UIWindowScene objects instead.
+         */
+
+        NSSet<UIScene *> *connectedScenes =
+            application.connectedScenes;
+
+        for (UIScene *scene in connectedScenes) {
+
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
             }
 
-            NSArray<UIWindow *> *windows = application.windows;
+            UIWindowScene *windowScene =
+                (UIWindowScene *)scene;
+
+            if (windowScene.activationState ==
+                UISceneActivationStateUnattached) {
+                continue;
+            }
+
+            NSArray<UIWindow *> *windows =
+                windowScene.windows;
 
             for (UIWindow *window in windows) {
 
@@ -92,51 +103,48 @@ static void BMOrientationChanged(NSNotification *notification)
                     continue;
                 }
 
-                /*
-                 * Only relayout windows.
-                 * We intentionally do not force orientation.
-                 */
-
-                BOOL landscape = BMIsLandscape(window);
-
-                (void)landscape;
-
                 BMRelayoutWindow(window);
             }
+        }
+
+    }
+    @catch (__unused NSException *exception) {
+        /*
+         * Fail safe.
+         */
+    }
+}
+
+#pragma mark - Orientation notification
+
+static void BMOrientationChanged(void)
+{
+    /*
+     * Wait until UIKit has finished updating
+     * the scene geometry before relayout.
+     */
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+
+            BMRelayoutAllWindows();
+
+            /*
+             * A second layout pass is useful because
+             * BubbleMe may update its own hierarchy
+             * one run-loop later.
+             */
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @autoreleasepool {
+                    BMRelayoutAllWindows();
+                }
+            });
         }
     });
 }
 
-#pragma mark - UIApplication
-
-%hook UIApplication
-
-- (void)sendEvent:(UIEvent *)event
-{
-    %orig;
-
-    if (!event) {
-        return;
-    }
-
-    if (event.type != UIEventTypeMotion) {
-        return;
-    }
-
-    if (event.subtype != UIEventSubtypeMotionShake) {
-        return;
-    }
-
-    /*
-     * No orientation changes are performed here.
-     *
-     * This hook is intentionally harmless.
-     */
-}
-
-%end
-
-#pragma mark - UIWindow
+#pragma mark - UIWindow hook
 
 %hook UIWindow
 
@@ -144,17 +152,14 @@ static void BMOrientationChanged(NSNotification *notification)
 {
     %orig;
 
-    /*
-     * Do not modify the bounds.
-     * Just allow BubbleMe/window hierarchy to relayout.
-     */
-
-    if (!self.windowScene) {
+    if (self.windowScene == nil) {
         return;
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        BMRelayoutWindow(self);
+        @autoreleasepool {
+            BMRelayoutWindow(self);
+        }
     });
 }
 
@@ -162,18 +167,20 @@ static void BMOrientationChanged(NSNotification *notification)
 {
     %orig;
 
-    if (!self.windowScene) {
+    if (self.windowScene == nil) {
         return;
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        BMRelayoutWindow(self);
+        @autoreleasepool {
+            BMRelayoutWindow(self);
+        }
     });
 }
 
 %end
 
-#pragma mark - UIScene
+#pragma mark - UIWindowScene hook
 
 %hook UIWindowScene
 
@@ -181,16 +188,44 @@ static void BMOrientationChanged(NSNotification *notification)
 {
     %orig;
 
-    /*
-     * iOS updates scene geometry here during rotation.
-     * We do NOT replace the geometry or force Portrait.
-     */
-
     dispatch_async(dispatch_get_main_queue(), ^{
-        for (UIWindow *window in self.windows) {
-            BMRelayoutWindow(window);
+        @autoreleasepool {
+
+            UIWindowScene *scene = self;
+
+            if (scene == nil) {
+                return;
+            }
+
+            NSArray<UIWindow *> *windows =
+                scene.windows;
+
+            for (UIWindow *window in windows) {
+                BMRelayoutWindow(window);
+            }
         }
     });
+}
+
+%end
+
+#pragma mark - UIApplicationDelegate style orientation notification
+
+%hook UIDevice
+
+- (void)setOrientation:(UIDeviceOrientation)orientation
+{
+    %orig;
+
+    /*
+     * IMPORTANT:
+     *
+     * We do NOT change the orientation here.
+     * We only observe the change and ask UIKit
+     * to perform another layout pass.
+     */
+
+    BMOrientationChanged();
 }
 
 %end
@@ -201,34 +236,59 @@ static void BMOrientationChanged(NSNotification *notification)
 {
     @autoreleasepool {
 
-        /*
-         * Only load in SpringBoard.
-         *
-         * The plist also filters SpringBoard,
-         * but this extra guard is intentional.
-         */
-
         NSString *bundleIdentifier =
             NSBundle.mainBundle.bundleIdentifier;
 
-        if (![bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+        /*
+         * Safety guard:
+         * this dylib should only operate inside SpringBoard.
+         */
+
+        if (![bundleIdentifier
+              isEqualToString:@"com.apple.springboard"]) {
             return;
         }
 
         NSNotificationCenter *center =
             NSNotificationCenter.defaultCenter;
 
-        if (!center) {
+        if (center == nil) {
             return;
         }
+
+        /*
+         * Device orientation.
+         */
 
         [center addObserverForName:
                     UIDeviceOrientationDidChangeNotification
                     object:nil
                     queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(__unused NSNotification *note) {
+                    usingBlock:^(__unused NSNotification *notification) {
 
-            BMOrientationChanged(note);
+            BMOrientationChanged();
+        }];
+
+        /*
+         * Scene activation / geometry changes.
+         */
+
+        [center addObserverForName:
+                    UISceneDidActivateNotification
+                    object:nil
+                    queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
+
+            BMOrientationChanged();
+        }];
+
+        [center addObserverForName:
+                    UIWindowDidBecomeVisibleNotification
+                    object:nil
+                    queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
+
+            BMOrientationChanged();
         }];
     }
 }
