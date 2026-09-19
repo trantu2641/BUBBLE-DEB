@@ -9,6 +9,10 @@ static BOOL BMOrientationFixInstalled = NO;
 
 static BOOL (*BMOriginalBundleNeedsLandscape)(id bundleID) = NULL;
 
+static NSMutableDictionary *BMLandscapeCache = nil;
+
+static BOOL BMLandscapeCacheInitialized = NO;
+
 static BOOL BMIsSpringBoard(void)
 {
     NSString *identifier =
@@ -20,6 +24,18 @@ static BOOL BMIsSpringBoard(void)
 
     return [identifier isEqualToString:
             @"com.apple.springboard"];
+}
+
+static void BMEnsureCache(void)
+{
+    if (BMLandscapeCacheInitialized) {
+        return;
+    }
+
+    BMLandscapeCacheInitialized = YES;
+
+    BMLandscapeCache =
+        [[NSMutableDictionary alloc] init];
 }
 
 static BOOL BMDeviceIsLandscape(void)
@@ -67,7 +83,9 @@ static BOOL BMDeviceIsLandscape(void)
     return NO;
 }
 
-static NSString *BMBundleIdentifierFromObject(id bundleID)
+static NSString *BMBundleIdentifierFromObject(
+    id bundleID
+)
 {
     if (bundleID == nil) {
         return nil;
@@ -87,7 +105,9 @@ static NSString *BMBundleIdentifierFromObject(id bundleID)
                     @selector(bundleIdentifier)
                 );
 
-        if ([identifier isKindOfClass:[NSString class]]) {
+        if ([identifier isKindOfClass:
+             [NSString class]]) {
+
             return identifier;
         }
     }
@@ -95,92 +115,85 @@ static NSString *BMBundleIdentifierFromObject(id bundleID)
     return nil;
 }
 
-static NSDictionary *BMApplicationInfoForBundleIdentifier(
+static BOOL BMReadLandscapeSupport(
     NSString *bundleIdentifier
 )
 {
     if (bundleIdentifier == nil ||
         bundleIdentifier.length == 0) {
 
-        return nil;
+        return NO;
     }
 
+    /*
+     * LaunchServices lookup chỉ thực hiện một lần
+     * cho mỗi bundle ID.
+     */
     Class proxyClass =
         objc_getClass("LSApplicationProxy");
 
-    if (proxyClass != Nil) {
-
-        SEL proxySelector =
-            NSSelectorFromString(
-                @"applicationProxyForIdentifier:"
-            );
-
-        if ([proxyClass
-             respondsToSelector:proxySelector]) {
-
-            id proxy =
-                ((id (*)(id, SEL, id))
-                    objc_msgSend)(
-                        proxyClass,
-                        proxySelector,
-                        bundleIdentifier
-                    );
-
-            if (proxy != nil) {
-
-                NSURL *bundleURL = nil;
-
-                SEL bundleURLSelector =
-                    NSSelectorFromString(
-                        @"bundleURL"
-                    );
-
-                if ([proxy
-                     respondsToSelector:bundleURLSelector]) {
-
-                    bundleURL =
-                        ((NSURL *(*)(id, SEL))
-                            objc_msgSend)(
-                                proxy,
-                                bundleURLSelector
-                            );
-                }
-
-                if (bundleURL != nil) {
-
-                    NSURL *infoURL =
-                        [bundleURL
-                         URLByAppendingPathComponent:
-                         @"Info.plist"];
-
-                    NSDictionary *info =
-                        [NSDictionary
-                         dictionaryWithContentsOfURL:
-                         infoURL];
-
-                    if ([info isKindOfClass:
-                         [NSDictionary class]]) {
-
-                        return info;
-                    }
-                }
-            }
-        }
+    if (proxyClass == Nil) {
+        return NO;
     }
 
-    return nil;
-}
-
-static BOOL BMApplicationSupportsLandscape(
-    NSString *bundleIdentifier
-)
-{
-    NSDictionary *info =
-        BMApplicationInfoForBundleIdentifier(
-            bundleIdentifier
+    SEL proxySelector =
+        NSSelectorFromString(
+            @"applicationProxyForIdentifier:"
         );
 
-    if (info == nil) {
+    if (![proxyClass
+          respondsToSelector:proxySelector]) {
+
+        return NO;
+    }
+
+    id proxy =
+        ((id (*)(id, SEL, id))
+            objc_msgSend)(
+                proxyClass,
+                proxySelector,
+                bundleIdentifier
+            );
+
+    if (proxy == nil) {
+        return NO;
+    }
+
+    SEL bundleURLSelector =
+        NSSelectorFromString(
+            @"bundleURL"
+        );
+
+    if (![proxy
+         respondsToSelector:bundleURLSelector]) {
+
+        return NO;
+    }
+
+    NSURL *bundleURL =
+        ((NSURL *(*)(id, SEL))
+            objc_msgSend)(
+                proxy,
+                bundleURLSelector
+            );
+
+    if (bundleURL == nil) {
+        return NO;
+    }
+
+    NSURL *infoURL =
+        [bundleURL
+         URLByAppendingPathComponent:
+         @"Info.plist"];
+
+    NSDictionary *info =
+        [NSDictionary
+         dictionaryWithContentsOfURL:
+         infoURL];
+
+    if (![info isKindOfClass:
+          [NSDictionary class]]) {
+
         return NO;
     }
 
@@ -190,6 +203,11 @@ static BOOL BMApplicationSupportsLandscape(
     if (![orientations isKindOfClass:
           [NSArray class]]) {
 
+        /*
+         * Không có khai báo orientation.
+         *
+         * Không tự ý ép Landscape.
+         */
         return NO;
     }
 
@@ -197,6 +215,7 @@ static BOOL BMApplicationSupportsLandscape(
 
         if (![orientation isKindOfClass:
               [NSString class]]) {
+
             continue;
         }
 
@@ -216,6 +235,43 @@ static BOOL BMApplicationSupportsLandscape(
     return NO;
 }
 
+static BOOL BMApplicationSupportsLandscape(
+    NSString *bundleIdentifier
+)
+{
+    if (bundleIdentifier == nil ||
+        bundleIdentifier.length == 0) {
+
+        return NO;
+    }
+
+    BMEnsureCache();
+
+    NSNumber *cached =
+        BMLandscapeCache[bundleIdentifier];
+
+    if (cached != nil) {
+
+        return cached.boolValue;
+    }
+
+    BOOL supported =
+        BMReadLandscapeSupport(
+            bundleIdentifier
+        );
+
+    /*
+     * Cache kết quả.
+     *
+     * Sau lần đầu tiên, hook không còn
+     * phải truy vấn LaunchServices nữa.
+     */
+    BMLandscapeCache[bundleIdentifier] =
+        @(supported);
+
+    return supported;
+}
+
 static BOOL BMOriginalSupportsLandscape(
     id bundleID
 )
@@ -233,40 +289,49 @@ static BOOL BMHookedBundleNeedsLandscape(
     id bundleID
 )
 {
-    BOOL originalResult =
-        BMOriginalSupportsLandscape(
-            bundleID
-        );
-
+    /*
+     * Lấy bundle ID trước.
+     */
     NSString *identifier =
         BMBundleIdentifierFromObject(
             bundleID
         );
 
+    /*
+     * Không xác định được app:
+     * giữ nguyên BubbleMe.
+     */
     if (identifier == nil) {
 
-        return originalResult;
+        return BMOriginalSupportsLandscape(
+            bundleID
+        );
     }
 
     /*
-     * Nếu app không khai báo Landscape,
-     * tuyệt đối không ép nó sang ngang.
+     * Kiểm tra cache.
      */
-    BOOL applicationSupportsLandscape =
+    BOOL supportsLandscape =
         BMApplicationSupportsLandscape(
             identifier
         );
 
-    if (!applicationSupportsLandscape) {
+    /*
+     * App không hỗ trợ Landscape:
+     *
+     * TUYỆT ĐỐI không ép.
+     */
+    if (!supportsLandscape) {
 
-        return originalResult;
+        return BMOriginalSupportsLandscape(
+            bundleID
+        );
     }
 
     /*
      * App có hỗ trợ Landscape.
      *
-     * Khi thiết bị đang ngang, cho phép
-     * BubbleMe tạo Live Scene ở Landscape.
+     * Chỉ ép YES khi thiết bị thực sự ngang.
      */
     if (BMDeviceIsLandscape()) {
 
@@ -274,10 +339,12 @@ static BOOL BMHookedBundleNeedsLandscape(
     }
 
     /*
-     * Khi thiết bị không ngang, giữ nguyên
-     * logic gốc của BubbleMe.
+     * Khi đang dọc, để BubbleMe xử lý
+     * theo logic gốc.
      */
-    return originalResult;
+    return BMOriginalSupportsLandscape(
+        bundleID
+    );
 }
 
 static void BMInstallFunctionHook(void)
@@ -326,130 +393,6 @@ static void BMInstallFunctionHook(void)
     }
 }
 
-static void BMRefreshBubbleOrientation(void)
-{
-    Class managerClass =
-        objc_getClass("BMBubbleManager");
-
-    if (managerClass == Nil) {
-        return;
-    }
-
-    id manager = nil;
-
-    SEL sharedSelector =
-        NSSelectorFromString(
-            @"sharedManager"
-        );
-
-    if ([managerClass
-         respondsToSelector:sharedSelector]) {
-
-        manager =
-            ((id (*)(id, SEL))
-                objc_msgSend)(
-                    managerClass,
-                    sharedSelector
-                );
-    }
-
-    if (manager == nil) {
-
-        SEL sharedInstanceSelector =
-            NSSelectorFromString(
-                @"sharedInstance"
-            );
-
-        if ([managerClass
-             respondsToSelector:sharedInstanceSelector]) {
-
-            manager =
-                ((id (*)(id, SEL))
-                    objc_msgSend)(
-                        managerClass,
-                        sharedInstanceSelector
-                    );
-        }
-    }
-
-    if (manager == nil) {
-        return;
-    }
-
-    SEL applySelector =
-        NSSelectorFromString(
-            @"bm_applyChromeForCurrentOrientation"
-        );
-
-    if ([manager respondsToSelector:applySelector]) {
-
-        ((void (*)(id, SEL))
-            objc_msgSend)(
-                manager,
-                applySelector
-            );
-    }
-
-    SEL refreshSelector =
-        NSSelectorFromString(
-            @"bm_refreshLiveContentHostView"
-        );
-
-    if ([manager respondsToSelector:refreshSelector]) {
-
-        ((void (*)(id, SEL))
-            objc_msgSend)(
-                manager,
-                refreshSelector
-            );
-    }
-}
-
-static void BMOrientationChanged(void)
-{
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
-            @autoreleasepool {
-
-                BMInstallFunctionHook();
-
-                BMRefreshBubbleOrientation();
-
-                dispatch_after(
-                    dispatch_time(
-                        DISPATCH_TIME_NOW,
-                        (int64_t)(
-                            0.15 *
-                            NSEC_PER_SEC
-                        )
-                    ),
-                    dispatch_get_main_queue(),
-                    ^{
-                        BMInstallFunctionHook();
-                        BMRefreshBubbleOrientation();
-                    }
-                );
-
-                dispatch_after(
-                    dispatch_time(
-                        DISPATCH_TIME_NOW,
-                        (int64_t)(
-                            0.40 *
-                            NSEC_PER_SEC
-                        )
-                    ),
-                    dispatch_get_main_queue(),
-                    ^{
-                        BMInstallFunctionHook();
-                        BMRefreshBubbleOrientation();
-                    }
-                );
-            }
-        }
-    );
-}
-
 static void BMInstallNotifications(void)
 {
     NSNotificationCenter *center =
@@ -459,6 +402,12 @@ static void BMInstallNotifications(void)
         return;
     }
 
+    /*
+     * Chỉ dùng notification để BubbleMe
+     * biết orientation đã thay đổi.
+     *
+     * Không refresh Live Scene liên tục.
+     */
     [center addObserverForName:
                 UIDeviceOrientationDidChangeNotification
                 object:nil
@@ -466,7 +415,7 @@ static void BMInstallNotifications(void)
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMOrientationChanged();
+        BMInstallFunctionHook();
     }];
 
     [center addObserverForName:
@@ -476,27 +425,7 @@ static void BMInstallNotifications(void)
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMOrientationChanged();
-    }];
-
-    [center addObserverForName:
-                UISceneWillDeactivateNotification
-                object:nil
-                queue:[NSOperationQueue mainQueue]
-                usingBlock:
-        ^(__unused NSNotification *notification) {
-
-        BMOrientationChanged();
-    }];
-
-    [center addObserverForName:
-                UIApplicationDidBecomeActiveNotification
-                object:nil
-                queue:[NSOperationQueue mainQueue]
-                usingBlock:
-        ^(__unused NSNotification *notification) {
-
-        BMOrientationChanged();
+        BMInstallFunctionHook();
     }];
 }
 
@@ -509,30 +438,19 @@ static void BubbleMeOrientationFixInit(void)
             return;
         }
 
+        /*
+         * Khởi tạo cache trước.
+         */
+        BMEnsureCache();
+
+        /*
+         * Cài hook ngay lập tức.
+         */
         BMInstallFunctionHook();
 
+        /*
+         * Chỉ cài notification nhẹ.
+         */
         BMInstallNotifications();
-
-        dispatch_async(
-            dispatch_get_main_queue(),
-            ^{
-                BMInstallFunctionHook();
-                BMRefreshBubbleOrientation();
-            }
-        );
-
-        dispatch_after(
-            dispatch_time(
-                DISPATCH_TIME_NOW,
-                (int64_t)(
-                    1.0 *
-                    NSEC_PER_SEC
-                )
-            ),
-            dispatch_get_main_queue(),
-            ^{
-                BMInstallFunctionHook();
-            }
-        );
     }
 }
