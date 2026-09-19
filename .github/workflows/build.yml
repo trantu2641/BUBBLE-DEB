@@ -11,11 +11,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install RootHide Theos
         run: |
+          set -e
+
           brew install ldid xz
-          git clone --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+
+          rm -rf "$HOME/theos"
+
+          git clone \
+            --depth=1 \
+            https://github.com/roothide/theos.git \
+            "$HOME/theos"
+
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+          echo "=== Theos ==="
+          ls -la "$HOME/theos"
 
       - name: Install iPhoneOS SDK
         run: |
@@ -46,30 +58,11 @@ jobs:
             iPhoneOS16.5.sdk \
             "$HOME/theos/sdks/"
 
-          echo "Installed SDK:"
-          ls -ld "$HOME/theos/sdks/iPhoneOS16.5.sdk"
+          echo "=== Installed SDK ==="
+          ls -ld \
+            "$HOME/theos/sdks/iPhoneOS16.5.sdk"
 
-      - name: Install roothide toolchain
-        run: |
-          set -e
-
-          rm -rf /tmp/roothide-theos
-
-          git clone \
-            --depth=1 \
-            https://github.com/roothide/theos.git \
-            /tmp/roothide-theos
-
-          if [ -d "/tmp/roothide-theos/toolchain" ]; then
-            cp -R \
-              /tmp/roothide-theos/toolchain \
-              "$HOME/theos/"
-          else
-            echo "ERROR: roothide toolchain not found"
-            exit 1
-          fi
-
-      - name: Verify Theos
+      - name: Verify RootHide Theos
         run: |
           set -e
 
@@ -79,12 +72,40 @@ jobs:
           echo "$THEOS"
 
           echo "=== SDK ==="
-          ls -ld "$THEOS/sdks/iPhoneOS16.5.sdk"
+          ls -ld \
+            "$THEOS/sdks/iPhoneOS16.5.sdk"
 
-          echo "=== TOOLCHAIN ==="
-          find "$THEOS/toolchain" -maxdepth 3 -type f \
-            \( -name clang -o -name clang++ \) \
-            -print
+          echo "=== RootHide files ==="
+
+          find "$THEOS" \
+            -maxdepth 3 \
+            -type f \
+            | head -100
+
+      - name: Verify source files
+        run: |
+          set -e
+
+          echo "=== Repository ==="
+          find . -maxdepth 4 -type f | sort
+
+          echo "=== OrientationFix.m ==="
+
+          if [ ! -f "OrientationFix.m" ]; then
+            echo "ERROR: OrientationFix.m not found"
+            exit 1
+          fi
+
+          echo "OrientationFix.m OK"
+
+          echo "=== Makefile ==="
+
+          if [ ! -f "Makefile" ]; then
+            echo "ERROR: Makefile not found"
+            exit 1
+          fi
+
+          echo "Makefile OK"
 
       - name: Build orientation fix
         run: |
@@ -92,8 +113,43 @@ jobs:
 
           export THEOS="$HOME/theos"
 
+          echo "=== Building ==="
+
           make clean || true
+
           make package FINALPACKAGE=1
+
+          echo "=== Packages generated ==="
+
+          find packages \
+            -maxdepth 2 \
+            -type f \
+            -name '*.deb' \
+            -print
+
+      - name: Check orientation fix package
+        run: |
+          set -e
+
+          FIX_DEB=$(find packages \
+            -type f \
+            -name '*BubbleMeOrientationFix*.deb' \
+            | head -1)
+
+          if [ -z "$FIX_DEB" ]; then
+            echo "ERROR: BubbleMeOrientationFix DEB not found"
+
+            echo "=== All generated files ==="
+            find packages -type f 2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$FIX_DEB"
+
+          echo "=== DEB contents ==="
+          ar t "$FIX_DEB"
 
       - name: Assemble BubbleMe package
         run: |
@@ -130,7 +186,7 @@ jobs:
             package/Library/PreferenceLoader/Preferences/BubbleMePrefs.plist \
             "$PKGROOT/Library/PreferenceLoader/Preferences/"
 
-          echo "=== Find orientation fix DEB ==="
+          echo "=== Find orientation fix ==="
 
           FIX_DEB=$(find packages \
             -type f \
@@ -138,22 +194,24 @@ jobs:
             | head -1)
 
           if [ -z "$FIX_DEB" ]; then
-            echo "ERROR: BubbleMeOrientationFix DEB not found"
-            echo "=== packages ==="
-            find packages -type f 2>/dev/null || true
+            echo "ERROR: orientation fix DEB not found"
             exit 1
           fi
 
-          echo "Found:"
+          echo "Using:"
           echo "$FIX_DEB"
 
           rm -rf "$RUNNER_TEMP/fix"
           rm -rf "$RUNNER_TEMP/fixdata"
 
-          mkdir -p "$RUNNER_TEMP/fix"
-          mkdir -p "$RUNNER_TEMP/fixdata"
+          mkdir -p \
+            "$RUNNER_TEMP/fix"
 
-          ar -x "$FIX_DEB" \
+          mkdir -p \
+            "$RUNNER_TEMP/fixdata"
+
+          ar -x \
+            "$FIX_DEB" \
             --output "$RUNNER_TEMP/fix"
 
           DATA_TAR=$(find "$RUNNER_TEMP/fix" \
@@ -161,14 +219,12 @@ jobs:
             | head -1)
 
           if [ -z "$DATA_TAR" ]; then
-            echo "ERROR: data.tar archive not found"
+            echo "ERROR: data.tar not found"
             exit 1
           fi
 
-          echo "Data archive:"
-          echo "$DATA_TAR"
-
-          tar -xf "$DATA_TAR" \
+          tar \
+            -xf "$DATA_TAR" \
             -C "$RUNNER_TEMP/fixdata"
 
           FIX_DYLIB="$RUNNER_TEMP/fixdata/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib"
@@ -176,8 +232,8 @@ jobs:
           if [ ! -f "$FIX_DYLIB" ]; then
             echo "ERROR: BubbleMeOrientationFix.dylib not found"
 
-            echo "=== Extracted files ==="
-            find "$RUNNER_TEMP/fixdata" -type f
+            find "$RUNNER_TEMP/fixdata" \
+              -type f
 
             exit 1
           fi
@@ -190,11 +246,12 @@ jobs:
             RootHide.plist \
             "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist"
 
-          echo "=== Creating control ==="
+          echo "=== Creating control file ==="
 
           CONTROL="$RUNNER_TEMP/control"
 
           rm -rf "$CONTROL"
+
           mkdir -p "$CONTROL"
 
           printf '%s\n' \
@@ -231,8 +288,6 @@ jobs:
             "$RUNNER_TEMP/control.tar.gz" \
             "$RUNNER_TEMP/data.tar.gz"
 
-          echo "=== DEB CREATED ==="
-
           ls -lh \
             BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
 
@@ -240,59 +295,64 @@ jobs:
         run: |
           set -e
 
+          DEB="BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb"
+
           echo "=== DEB FILE ==="
 
-          file \
-            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
+          file "$DEB"
 
           echo "=== DEB MEMBERS ==="
 
-          ar t \
-            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
+          ar t "$DEB"
 
           rm -rf /tmp/check
+          rm -rf /tmp/final-package
+
           mkdir -p /tmp/check
+          mkdir -p /tmp/final-package
 
           ar -x \
-            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb \
+            "$DEB" \
             --output /tmp/check
 
           DATA_TAR=$(find /tmp/check \
             -name 'data.tar.*' \
             | head -1)
 
-          echo "=== PACKAGE CONTENTS ==="
+          if [ -z "$DATA_TAR" ]; then
+            echo "ERROR: data archive not found"
+            exit 1
+          fi
 
-          tar -tzf "$DATA_TAR"
+          tar \
+            -xzf "$DATA_TAR" \
+            -C /tmp/final-package
 
           echo "=== ORIGINAL BUBBLEME ==="
 
           file \
             package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
 
-          echo "=== EXTRACT FINAL PACKAGE ==="
-
-          rm -rf /tmp/final-package
-          mkdir -p /tmp/final-package
-
-          tar \
-            -xzf "$DATA_TAR" \
-            -C /tmp/final-package
-
-          echo "=== FINAL BUBBLEME DYLIB ==="
+          echo "=== FINAL BUBBLEME ==="
 
           file \
             /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
 
-          echo "=== FINAL ORIENTATION DYLIB ==="
+          echo "=== ORIENTATION FIX ==="
 
           file \
             /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib
 
-          echo "=== DYNAMIC LIBRARIES ==="
+          echo "=== FINAL DYNAMIC LIBRARIES ==="
 
           ls -lh \
             /tmp/final-package/Library/MobileSubstrate/DynamicLibraries/
+
+          echo "=== FINAL PACKAGE CONTENTS ==="
+
+          find /tmp/final-package \
+            -type f \
+            | sort
 
           echo "=== VALIDATION COMPLETE ==="
 
