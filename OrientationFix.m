@@ -2,54 +2,48 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-#pragma mark - Original IMP storage
-
-static IMP BMOriginalLockWindowToPortrait = NULL;
-static IMP BMOriginalSetLandscapeLocked = NULL;
 static IMP BMOriginalSetInterfaceOrientation = NULL;
 static IMP BMOriginalSetDeviceOrientation = NULL;
-static IMP BMOriginalSupportedInterfaceOrientations = NULL;
-static IMP BMOriginalShouldAutorotate = NULL;
-static IMP BMOriginalPreferredInterfaceOrientation = NULL;
-
-#pragma mark - Current orientation
+static IMP BMOriginalSetLandscapeLocked = NULL;
 
 static UIInterfaceOrientation BMCurrentInterfaceOrientation(void)
 {
     UIApplication *application =
         UIApplication.sharedApplication;
 
-    if (application == nil)
+    if (application == nil) {
         return UIInterfaceOrientationPortrait;
+    }
 
     NSSet<UIScene *> *scenes =
         application.connectedScenes;
 
     for (UIScene *scene in scenes) {
 
-        if (![scene isKindOfClass:[UIWindowScene class]])
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
+        }
 
         UIWindowScene *windowScene =
             (UIWindowScene *)scene;
 
         if (windowScene.activationState ==
-            UISceneActivationStateUnattached)
+            UISceneActivationStateUnattached) {
             continue;
+        }
 
         UIInterfaceOrientation orientation =
             windowScene.interfaceOrientation;
 
-        if (orientation != UIInterfaceOrientationUnknown)
+        if (orientation != UIInterfaceOrientationUnknown) {
             return orientation;
+        }
     }
 
     return UIInterfaceOrientationPortrait;
 }
 
-#pragma mark - Orientation test
-
-static BOOL BMIsLandscapeOrientation(
+static BOOL BMIsLandscape(
     UIInterfaceOrientation orientation
 )
 {
@@ -59,21 +53,24 @@ static BOOL BMIsLandscapeOrientation(
                UIInterfaceOrientationLandscapeRight;
 }
 
-#pragma mark - Safe relayout
-
-static void BMRelayoutWindow(UIWindow *window)
+static void BMRelayoutWindow(
+    UIWindow *window
+)
 {
-    if (window == nil)
+    if (window == nil) {
         return;
+    }
 
-    if (window.windowScene == nil)
+    if (window.windowScene == nil) {
         return;
+    }
 
     CGRect bounds = window.bounds;
 
     if (bounds.size.width <= 0.0 ||
-        bounds.size.height <= 0.0)
+        bounds.size.height <= 0.0) {
         return;
+    }
 
     @try {
 
@@ -103,8 +100,9 @@ static void BMRelayoutAllWindows(void)
     UIApplication *application =
         UIApplication.sharedApplication;
 
-    if (application == nil)
+    if (application == nil) {
         return;
+    }
 
     @try {
 
@@ -113,17 +111,22 @@ static void BMRelayoutAllWindows(void)
 
         for (UIScene *scene in scenes) {
 
-            if (![scene isKindOfClass:[UIWindowScene class]])
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
                 continue;
+            }
 
             UIWindowScene *windowScene =
                 (UIWindowScene *)scene;
 
             if (windowScene.activationState ==
-                UISceneActivationStateUnattached)
+                UISceneActivationStateUnattached) {
                 continue;
+            }
 
-            for (UIWindow *window in windowScene.windows) {
+            NSArray<UIWindow *> *windows =
+                windowScene.windows;
+
+            for (UIWindow *window in windows) {
                 BMRelayoutWindow(window);
             }
         }
@@ -138,7 +141,6 @@ static void BMScheduleRelayout(void)
     dispatch_async(
         dispatch_get_main_queue(),
         ^{
-
             @autoreleasepool {
 
                 BMRelayoutAllWindows();
@@ -146,208 +148,155 @@ static void BMScheduleRelayout(void)
                 dispatch_async(
                     dispatch_get_main_queue(),
                     ^{
-
                         @autoreleasepool {
                             BMRelayoutAllWindows();
                         }
-
                     }
                 );
             }
-
         }
     );
 }
 
-#pragma mark - BMBubbleWindow
-#
-# This is the important part.
-#
-# BubbleMe contains BMBubbleWindow and exposes
-# setInterfaceOrientation: / setDeviceOrientation:.
-#
-# We allow the actual device orientation instead
-# of allowing BubbleMe to force Portrait.
-
-static void BM_BubbleWindow_setInterfaceOrientation(
+static void BMSetInterfaceOrientation(
     id self,
     SEL selector,
     UIInterfaceOrientation orientation
 )
 {
-    if (BMOriginalSetInterfaceOrientation == NULL)
+    IMP original =
+        BMOriginalSetInterfaceOrientation;
+
+    if (original == NULL) {
         return;
+    }
 
     UIInterfaceOrientation current =
         BMCurrentInterfaceOrientation();
 
-    /*
-     * If UIKit is already in Landscape, do NOT allow
-     * BubbleMe to replace it with Portrait.
-     */
-
-    if (BMIsLandscapeOrientation(current)) {
+    if (BMIsLandscape(current)) {
 
         ((void (*)(id, SEL, UIInterfaceOrientation))
-            BMOriginalSetInterfaceOrientation)(
+            original)(
                 self,
                 selector,
                 current
             );
 
+        BMScheduleRelayout();
+
         return;
     }
 
-    /*
-     * Otherwise preserve the orientation requested
-     * by BubbleMe.
-     */
-
     ((void (*)(id, SEL, UIInterfaceOrientation))
-        BMOriginalSetInterfaceOrientation)(
+        original)(
             self,
             selector,
             orientation
         );
 }
 
-#pragma mark - BMBubbleWindow device orientation
-
-static void BM_BubbleWindow_setDeviceOrientation(
+static void BMSetDeviceOrientation(
     id self,
     SEL selector,
     UIDeviceOrientation orientation
 )
 {
-    if (BMOriginalSetDeviceOrientation == NULL)
+    IMP original =
+        BMOriginalSetDeviceOrientation;
+
+    if (original == NULL) {
         return;
+    }
 
     UIInterfaceOrientation current =
         BMCurrentInterfaceOrientation();
 
-    /*
-     * When UIKit has already switched to Landscape,
-     * pass a matching landscape orientation instead of
-     * allowing BubbleMe to reset itself to Portrait.
-     */
-
-    if (BMIsLandscapeOrientation(current)) {
+    if (BMIsLandscape(current)) {
 
         UIDeviceOrientation deviceOrientation;
 
-        if (current == UIInterfaceOrientationLandscapeLeft) {
+        if (current ==
+            UIInterfaceOrientationLandscapeLeft) {
+
             deviceOrientation =
                 UIDeviceOrientationLandscapeRight;
-        }
-        else {
+
+        } else {
+
             deviceOrientation =
                 UIDeviceOrientationLandscapeLeft;
         }
 
         ((void (*)(id, SEL, UIDeviceOrientation))
-            BMOriginalSetDeviceOrientation)(
+            original)(
                 self,
                 selector,
                 deviceOrientation
             );
 
+        BMScheduleRelayout();
+
         return;
     }
 
     ((void (*)(id, SEL, UIDeviceOrientation))
-        BMOriginalSetDeviceOrientation)(
+        original)(
             self,
             selector,
             orientation
         );
 }
 
-#pragma mark - BMBubbleRootViewController
-#
-# Tell UIKit that BubbleMe's root controller is
-# allowed to rotate.
-
 static UIInterfaceOrientationMask
-BM_BubbleRoot_supportedInterfaceOrientations(
-    id self,
-    SEL selector
+BMSupportedInterfaceOrientations(
+    __unused id self,
+    __unused SEL selector
 )
 {
-    (void)self;
-    (void)selector;
-
-    /*
-     * Allow all normal iPhone orientations.
-     *
-     * This prevents BubbleMe's root controller from
-     * advertising Portrait-only support.
-     */
-
     return UIInterfaceOrientationMaskAll;
 }
 
 static BOOL
-BM_BubbleRoot_shouldAutorotate(
-    id self,
-    SEL selector
+BMShouldAutorotate(
+    __unused id self,
+    __unused SEL selector
 )
 {
-    (void)self;
-    (void)selector;
-
     return YES;
 }
 
 static UIInterfaceOrientation
-BM_BubbleRoot_preferredInterfaceOrientationForPresentation(
-    id self,
-    SEL selector
+BMPreferredInterfaceOrientation(
+    __unused id self,
+    __unused SEL selector
 )
 {
-    (void)self;
-    (void)selector;
-
     UIInterfaceOrientation current =
         BMCurrentInterfaceOrientation();
 
-    /*
-     * Do not advertise Portrait when the device is
-     * already in Landscape.
-     */
-
-    if (BMIsLandscapeOrientation(current))
+    if (BMIsLandscape(current)) {
         return current;
+    }
 
     return UIInterfaceOrientationPortrait;
 }
 
-#pragma mark - BubbleMe landscape lock
-#
-# BubbleMe exposes:
-#
-#   landscapeLocked
-#   setLandscapeLocked:
-#
-# We force the internal lock OFF.
-#
-# This is much more targeted than changing every
-# UIWindow in SpringBoard.
-
-static void BM_BubbleManager_setLandscapeLocked(
+static void BMSetLandscapeLocked(
     id self,
     SEL selector,
-    BOOL locked
+    __unused BOOL locked
 )
 {
-    if (BMOriginalSetLandscapeLocked == NULL)
-        return;
+    IMP original =
+        BMOriginalSetLandscapeLocked;
 
-    /*
-     * Never allow BubbleMe to enable its orientation lock.
-     */
+    if (original == NULL) {
+        return;
+    }
 
     ((void (*)(id, SEL, BOOL))
-        BMOriginalSetLandscapeLocked)(
+        original)(
             self,
             selector,
             NO
@@ -356,45 +305,20 @@ static void BM_BubbleManager_setLandscapeLocked(
     BMScheduleRelayout();
 }
 
-#pragma mark - bm_lockWindowToPortrait
-#
-# BubbleMe has an explicit method with this name.
-#
-# Instead of patching the binary, we replace this
-# method with a no-op.
-#
-# If the method does not exist on the installed version,
-# nothing happens.
-
-static void BM_Bubble_lockWindowToPortrait(
-    id self,
-    SEL selector
-)
-{
-    (void)self;
-    (void)selector;
-
-    /*
-     * INTENTIONALLY EMPTY.
-     *
-     * BubbleMe must not lock its window to Portrait.
-     */
-}
-
-#pragma mark - Runtime swizzle
-
-static BOOL BMSwizzleExistingMethod(
+static void BMSwizzle(
     Class cls,
     SEL selector,
     IMP replacement,
     IMP *originalIMP
 )
 {
-    if (cls == Nil)
-        return NO;
+    if (cls == Nil) {
+        return;
+    }
 
-    if (selector == NULL)
-        return NO;
+    if (selector == NULL) {
+        return;
+    }
 
     Method method =
         class_getInstanceMethod(
@@ -402,113 +326,104 @@ static BOOL BMSwizzleExistingMethod(
             selector
         );
 
-    if (method == NULL)
-        return NO;
+    if (method == NULL) {
+        return;
+    }
 
     IMP original =
         method_getImplementation(method);
 
-    if (originalIMP != NULL)
+    if (originalIMP != NULL) {
         *originalIMP = original;
+    }
 
     method_setImplementation(
         method,
         replacement
     );
-
-    return YES;
 }
-
-#pragma mark - Install BMBubbleWindow hooks
 
 static void BMInstallBubbleWindowHooks(void)
 {
     Class cls =
         objc_getClass("BMBubbleWindow");
 
-    if (cls == Nil)
+    if (cls == Nil) {
         return;
+    }
 
-    BMSwizzleExistingMethod(
+    BMSwizzle(
         cls,
         @selector(setInterfaceOrientation:),
-        (IMP)BM_BubbleWindow_setInterfaceOrientation,
+        (IMP)BMSetInterfaceOrientation,
         &BMOriginalSetInterfaceOrientation
     );
 
-    BMSwizzleExistingMethod(
+    BMSwizzle(
         cls,
         @selector(setDeviceOrientation:),
-        (IMP)BM_BubbleWindow_setDeviceOrientation,
+        (IMP)BMSetDeviceOrientation,
         &BMOriginalSetDeviceOrientation
     );
 }
-
-#pragma mark - Install RootViewController hooks
 
 static void BMInstallRootControllerHooks(void)
 {
     Class cls =
         objc_getClass("BMBubbleRootViewController");
 
-    if (cls == Nil)
+    if (cls == Nil) {
         return;
+    }
 
-    BMSwizzleExistingMethod(
+    BMSwizzle(
         cls,
         @selector(supportedInterfaceOrientations),
-        (IMP)BM_BubbleRoot_supportedInterfaceOrientations,
-        &BMOriginalSupportedInterfaceOrientations
+        (IMP)BMSupportedInterfaceOrientations,
+        NULL
     );
 
-    BMSwizzleExistingMethod(
+    BMSwizzle(
         cls,
         @selector(shouldAutorotate),
-        (IMP)BM_BubbleRoot_shouldAutorotate,
-        &BMOriginalShouldAutorotate
+        (IMP)BMShouldAutorotate,
+        NULL
     );
 
-    BMSwizzleExistingMethod(
+    BMSwizzle(
         cls,
         @selector(preferredInterfaceOrientationForPresentation),
-        (IMP)BM_BubbleRoot_preferredInterfaceOrientationForPresentation,
-        &BMOriginalPreferredInterfaceOrientation
+        (IMP)BMPreferredInterfaceOrientation,
+        NULL
     );
 }
-
-#pragma mark - Install landscape lock hook
 
 static void BMInstallLandscapeLockHook(void)
 {
-    /*
-     * Try BMBubbleManager first.
-     */
-
-    Class manager =
+    Class cls =
         objc_getClass("BMBubbleManager");
 
-    if (manager != Nil) {
-
-        BMSwizzleExistingMethod(
-            manager,
-            @selector(setLandscapeLocked:),
-            (IMP)BM_BubbleManager_setLandscapeLocked,
-            &BMOriginalSetLandscapeLocked
-        );
+    if (cls == Nil) {
+        return;
     }
+
+    BMSwizzle(
+        cls,
+        @selector(setLandscapeLocked:),
+        (IMP)BMSetLandscapeLocked,
+        &BMOriginalSetLandscapeLocked
+    );
 }
 
-#pragma mark - Install portrait lock hook
+static void BMLockWindowToPortraitNoop(
+    __unused id self,
+    __unused SEL selector
+)
+{
+}
 
 static void BMInstallPortraitLockHook(void)
 {
-    /*
-     * Search the known BubbleMe classes.
-     *
-     * The symbol exists in the binary, but its exact
-     * owning class can vary between builds.
-     */
-
     const char *classes[] = {
         "BMBubbleManager",
         "BMBubbleWindow",
@@ -525,34 +440,31 @@ static void BMInstallPortraitLockHook(void)
         Class cls =
             objc_getClass(classes[i]);
 
-        if (cls == Nil)
+        if (cls == Nil) {
             continue;
+        }
+
+        SEL selector =
+            @selector(bm_lockWindowToPortrait);
 
         Method method =
             class_getInstanceMethod(
                 cls,
-                @selector(bm_lockWindowToPortrait)
+                selector
             );
 
-        if (method == NULL)
+        if (method == NULL) {
             continue;
+        }
 
-        BMSwizzleExistingMethod(
-            cls,
-            @selector(bm_lockWindowToPortrait),
-            (IMP)BM_Bubble_lockWindowToPortrait,
-            &BMOriginalLockWindowToPortrait
+        method_setImplementation(
+            method,
+            (IMP)BMLockWindowToPortraitNoop
         );
-
-        /*
-         * One implementation is enough.
-         */
 
         break;
     }
 }
-
-#pragma mark - Orientation notifications
 
 static void BMOrientationChanged(
     __unused NSNotification *notification
@@ -561,18 +473,10 @@ static void BMOrientationChanged(
     BMScheduleRelayout();
 }
 
-#pragma mark - Constructor
-
 __attribute__((constructor))
 static void BubbleMeOrientationFixInit(void)
 {
     @autoreleasepool {
-
-        /*
-         * Safety:
-         *
-         * This dylib only operates inside SpringBoard.
-         */
 
         NSString *bundleIdentifier =
             NSBundle.mainBundle.bundleIdentifier;
@@ -582,10 +486,6 @@ static void BubbleMeOrientationFixInit(void)
             return;
         }
 
-        /*
-         * Install only targeted BubbleMe hooks.
-         */
-
         BMInstallBubbleWindowHooks();
 
         BMInstallRootControllerHooks();
@@ -594,15 +494,12 @@ static void BubbleMeOrientationFixInit(void)
 
         BMInstallPortraitLockHook();
 
-        /*
-         * Orientation notification.
-         */
-
         NSNotificationCenter *center =
             NSNotificationCenter.defaultCenter;
 
-        if (center == nil)
+        if (center == nil) {
             return;
+        }
 
         [center addObserverForName:
                     UIDeviceOrientationDidChangeNotification
