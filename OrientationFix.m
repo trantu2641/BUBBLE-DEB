@@ -1,61 +1,234 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static BOOL BMOFIsLandscape(void) {
-    UIWindow *key = nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        UIWindowScene *ws = (UIWindowScene *)scene;
-        if (ws.activationState != UISceneActivationStateForegroundActive && ws.activationState != UISceneActivationStateForegroundInactive) continue;
-        for (UIWindow *w in ws.windows) {
-            if ([w isKindOfClass:NSClassFromString(@"BMBubbleWindow")]) { key = w; break; }
-        }
-        if (key) break;
+#pragma mark - Safety
+
+static BOOL BMIsValidWindow(UIWindow *window)
+{
+    if (!window) {
+        return NO;
     }
-    if (!key) return NO;
-    return key.bounds.size.width > key.bounds.size.height;
+
+    if (!window.windowScene) {
+        return NO;
+    }
+
+    CGRect bounds = window.bounds;
+
+    if (bounds.size.width <= 0.0 || bounds.size.height <= 0.0) {
+        return NO;
+    }
+
+    return YES;
 }
 
-static UIWindow *BMFindBubbleWindow(void) {
-    Class cls = NSClassFromString(@"BMBubbleWindow");
-    if (!cls) return nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        UIWindowScene *ws = (UIWindowScene *)scene;
-        for (UIWindow *w in ws.windows) {
-            if ([w isKindOfClass:cls]) return w;
-        }
+static BOOL BMIsLandscape(UIWindow *window)
+{
+    if (!BMIsValidWindow(window)) {
+        return NO;
     }
-    return nil;
+
+    CGRect bounds = window.bounds;
+
+    return bounds.size.width > bounds.size.height;
 }
 
-static void BMRelayoutBubbleWindow(void) {
+#pragma mark - Safe relayout
+
+static void BMRelayoutWindow(UIWindow *window)
+{
+    if (!BMIsValidWindow(window)) {
+        return;
+    }
+
+    /*
+     * Do NOT modify:
+     *
+     * - interfaceOrientation
+     * - transform
+     * - frame
+     * - bounds
+     *
+     * We only request a fresh layout.
+     */
+
+    @try {
+        [window setNeedsLayout];
+        [window layoutIfNeeded];
+
+        UIViewController *root = window.rootViewController;
+
+        if (root) {
+            [root.view setNeedsLayout];
+            [root.view layoutIfNeeded];
+        }
+    }
+    @catch (__unused NSException *exception) {
+        /*
+         * Fail safe:
+         * never propagate an exception into SpringBoard.
+         */
+    }
+}
+
+#pragma mark - Orientation notification
+
+static void BMOrientationChanged(NSNotification *notification)
+{
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
-            UIWindow *w = BMFindBubbleWindow();
-            if (!w || !w.windowScene) return;
-            // Fail-safe: only ask UIKit to recompute layout. Do not force a
-            // controller orientation and do not apply a screen-wide transform.
-            if ([w respondsToSelector:@selector(setNeedsLayout)]) [w setNeedsLayout];
-            if ([w respondsToSelector:@selector(layoutIfNeeded)]) [w layoutIfNeeded];
+
+            UIApplication *application = UIApplication.sharedApplication;
+
+            if (!application) {
+                return;
+            }
+
+            NSArray<UIWindow *> *windows = application.windows;
+
+            for (UIWindow *window in windows) {
+
+                if (!BMIsValidWindow(window)) {
+                    continue;
+                }
+
+                /*
+                 * Only relayout windows.
+                 * We intentionally do not force orientation.
+                 */
+
+                BOOL landscape = BMIsLandscape(window);
+
+                (void)landscape;
+
+                BMRelayoutWindow(window);
+            }
         }
     });
 }
 
-static void BMOrientationChanged(NSNotification *n) {
-    (void)n;
-    BMRelayoutBubbleWindow();
+#pragma mark - UIApplication
+
+%hook UIApplication
+
+- (void)sendEvent:(UIEvent *)event
+{
+    %orig;
+
+    if (!event) {
+        return;
+    }
+
+    if (event.type != UIEventTypeMotion) {
+        return;
+    }
+
+    if (event.subtype != UIEventSubtypeMotionShake) {
+        return;
+    }
+
+    /*
+     * No orientation changes are performed here.
+     *
+     * This hook is intentionally harmless.
+     */
 }
 
-__attribute__((constructor))
-static void BubbleMeOrientationFixInit(void) {
+%end
+
+#pragma mark - UIWindow
+
+%hook UIWindow
+
+- (void)setBounds:(CGRect)bounds
+{
+    %orig;
+
+    /*
+     * Do not modify the bounds.
+     * Just allow BubbleMe/window hierarchy to relayout.
+     */
+
+    if (!self.windowScene) {
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BMRelayoutWindow(self);
+    });
+}
+
+- (void)setFrame:(CGRect)frame
+{
+    %orig;
+
+    if (!self.windowScene) {
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BMRelayoutWindow(self);
+    });
+}
+
+%end
+
+#pragma mark - UIScene
+
+%hook UIWindowScene
+
+- (void)setGeometry:(id)geometry
+{
+    %orig;
+
+    /*
+     * iOS updates scene geometry here during rotation.
+     * We do NOT replace the geometry or force Portrait.
+     */
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *window in self.windows) {
+            BMRelayoutWindow(window);
+        }
+    });
+}
+
+%end
+
+#pragma mark - Constructor
+
+%ctor
+{
     @autoreleasepool {
-        // This fix is intentionally limited to SpringBoard/BubbleMe's own window.
-        if (!NSClassFromString(@"BMBubbleWindow")) return;
-        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-        [nc addObserverForName:UIDeviceOrientationDidChangeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+
+        /*
+         * Only load in SpringBoard.
+         *
+         * The plist also filters SpringBoard,
+         * but this extra guard is intentional.
+         */
+
+        NSString *bundleIdentifier =
+            NSBundle.mainBundle.bundleIdentifier;
+
+        if (![bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+            return;
+        }
+
+        NSNotificationCenter *center =
+            NSNotificationCenter.defaultCenter;
+
+        if (!center) {
+            return;
+        }
+
+        [center addObserverForName:
+                    UIDeviceOrientationDidChangeNotification
+                    object:nil
+                    queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *note) {
+
             BMOrientationChanged(note);
         }];
-        [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
     }
 }
