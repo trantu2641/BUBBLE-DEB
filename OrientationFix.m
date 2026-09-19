@@ -1,97 +1,13 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <substrate.h>
 #import <dlfcn.h>
 
 static BOOL BMOrientationFixInstalled = NO;
 
 static BOOL (*BMOriginalBundleNeedsLandscape)(id bundleID) = NULL;
-
-static NSInteger BMCurrentDeviceOrientation(void)
-{
-    UIDeviceOrientation orientation =
-        UIDevice.currentDevice.orientation;
-
-    if (orientation == UIDeviceOrientationLandscapeLeft) {
-        return UIInterfaceOrientationLandscapeRight;
-    }
-
-    if (orientation == UIDeviceOrientationLandscapeRight) {
-        return UIInterfaceOrientationLandscapeLeft;
-    }
-
-    if (orientation == UIDeviceOrientationPortrait) {
-        return UIInterfaceOrientationPortrait;
-    }
-
-    if (orientation == UIDeviceOrientationPortraitUpsideDown) {
-        return UIInterfaceOrientationPortraitUpsideDown;
-    }
-
-    UIApplication *application =
-        UIApplication.sharedApplication;
-
-    if (application != nil) {
-
-        NSSet *scenes =
-            application.connectedScenes;
-
-        for (UIScene *scene in scenes) {
-
-            if (![scene isKindOfClass:[UIWindowScene class]]) {
-                continue;
-            }
-
-            UIWindowScene *windowScene =
-                (UIWindowScene *)scene;
-
-            UIInterfaceOrientation orientation2 =
-                windowScene.interfaceOrientation;
-
-            if (orientation2 !=
-                UIInterfaceOrientationUnknown) {
-
-                return orientation2;
-            }
-        }
-    }
-
-    return UIInterfaceOrientationPortrait;
-}
-
-static BOOL BMIsLandscapeNow(void)
-{
-    NSInteger orientation =
-        BMCurrentDeviceOrientation();
-
-    return orientation ==
-               UIInterfaceOrientationLandscapeLeft ||
-           orientation ==
-               UIInterfaceOrientationLandscapeRight;
-}
-
-static BOOL BMHookedBundleNeedsLandscape(
-    id bundleID
-)
-{
-    BOOL landscape =
-        BMIsLandscapeNow();
-
-    if (landscape) {
-
-        return YES;
-    }
-
-    if (BMOriginalBundleNeedsLandscape != NULL) {
-
-        return BMOriginalBundleNeedsLandscape(
-            bundleID
-        );
-    }
-
-    return NO;
-}
 
 static BOOL BMIsSpringBoard(void)
 {
@@ -104,6 +20,264 @@ static BOOL BMIsSpringBoard(void)
 
     return [identifier isEqualToString:
             @"com.apple.springboard"];
+}
+
+static BOOL BMDeviceIsLandscape(void)
+{
+    UIDeviceOrientation orientation =
+        UIDevice.currentDevice.orientation;
+
+    if (orientation == UIDeviceOrientationLandscapeLeft ||
+        orientation == UIDeviceOrientationLandscapeRight) {
+
+        return YES;
+    }
+
+    UIApplication *application =
+        UIApplication.sharedApplication;
+
+    if (application == nil) {
+        return NO;
+    }
+
+    NSSet *scenes =
+        application.connectedScenes;
+
+    for (UIScene *scene in scenes) {
+
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+
+        UIWindowScene *windowScene =
+            (UIWindowScene *)scene;
+
+        UIInterfaceOrientation interfaceOrientation =
+            windowScene.interfaceOrientation;
+
+        if (interfaceOrientation ==
+                UIInterfaceOrientationLandscapeLeft ||
+            interfaceOrientation ==
+                UIInterfaceOrientationLandscapeRight) {
+
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static NSString *BMBundleIdentifierFromObject(id bundleID)
+{
+    if (bundleID == nil) {
+        return nil;
+    }
+
+    if ([bundleID isKindOfClass:[NSString class]]) {
+        return (NSString *)bundleID;
+    }
+
+    if ([bundleID respondsToSelector:
+         @selector(bundleIdentifier)]) {
+
+        NSString *identifier =
+            ((NSString *(*)(id, SEL))
+                objc_msgSend)(
+                    bundleID,
+                    @selector(bundleIdentifier)
+                );
+
+        if ([identifier isKindOfClass:[NSString class]]) {
+            return identifier;
+        }
+    }
+
+    return nil;
+}
+
+static NSDictionary *BMApplicationInfoForBundleIdentifier(
+    NSString *bundleIdentifier
+)
+{
+    if (bundleIdentifier == nil ||
+        bundleIdentifier.length == 0) {
+
+        return nil;
+    }
+
+    Class proxyClass =
+        objc_getClass("LSApplicationProxy");
+
+    if (proxyClass != Nil) {
+
+        SEL proxySelector =
+            NSSelectorFromString(
+                @"applicationProxyForIdentifier:"
+            );
+
+        if ([proxyClass
+             respondsToSelector:proxySelector]) {
+
+            id proxy =
+                ((id (*)(id, SEL, id))
+                    objc_msgSend)(
+                        proxyClass,
+                        proxySelector,
+                        bundleIdentifier
+                    );
+
+            if (proxy != nil) {
+
+                NSURL *bundleURL = nil;
+
+                SEL bundleURLSelector =
+                    NSSelectorFromString(
+                        @"bundleURL"
+                    );
+
+                if ([proxy
+                     respondsToSelector:bundleURLSelector]) {
+
+                    bundleURL =
+                        ((NSURL *(*)(id, SEL))
+                            objc_msgSend)(
+                                proxy,
+                                bundleURLSelector
+                            );
+                }
+
+                if (bundleURL != nil) {
+
+                    NSURL *infoURL =
+                        [bundleURL
+                         URLByAppendingPathComponent:
+                         @"Info.plist"];
+
+                    NSDictionary *info =
+                        [NSDictionary
+                         dictionaryWithContentsOfURL:
+                         infoURL];
+
+                    if ([info isKindOfClass:
+                         [NSDictionary class]]) {
+
+                        return info;
+                    }
+                }
+            }
+        }
+    }
+
+    return nil;
+}
+
+static BOOL BMApplicationSupportsLandscape(
+    NSString *bundleIdentifier
+)
+{
+    NSDictionary *info =
+        BMApplicationInfoForBundleIdentifier(
+            bundleIdentifier
+        );
+
+    if (info == nil) {
+        return NO;
+    }
+
+    NSArray *orientations =
+        info[@"UISupportedInterfaceOrientations"];
+
+    if (![orientations isKindOfClass:
+          [NSArray class]]) {
+
+        return NO;
+    }
+
+    for (NSString *orientation in orientations) {
+
+        if (![orientation isKindOfClass:
+              [NSString class]]) {
+            continue;
+        }
+
+        if ([orientation isEqualToString:
+             @"UIInterfaceOrientationLandscapeLeft"]) {
+
+            return YES;
+        }
+
+        if ([orientation isEqualToString:
+             @"UIInterfaceOrientationLandscapeRight"]) {
+
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL BMOriginalSupportsLandscape(
+    id bundleID
+)
+{
+    if (BMOriginalBundleNeedsLandscape == NULL) {
+        return NO;
+    }
+
+    return BMOriginalBundleNeedsLandscape(
+        bundleID
+    );
+}
+
+static BOOL BMHookedBundleNeedsLandscape(
+    id bundleID
+)
+{
+    BOOL originalResult =
+        BMOriginalSupportsLandscape(
+            bundleID
+        );
+
+    NSString *identifier =
+        BMBundleIdentifierFromObject(
+            bundleID
+        );
+
+    if (identifier == nil) {
+
+        return originalResult;
+    }
+
+    /*
+     * Nếu app không khai báo Landscape,
+     * tuyệt đối không ép nó sang ngang.
+     */
+    BOOL applicationSupportsLandscape =
+        BMApplicationSupportsLandscape(
+            identifier
+        );
+
+    if (!applicationSupportsLandscape) {
+
+        return originalResult;
+    }
+
+    /*
+     * App có hỗ trợ Landscape.
+     *
+     * Khi thiết bị đang ngang, cho phép
+     * BubbleMe tạo Live Scene ở Landscape.
+     */
+    if (BMDeviceIsLandscape()) {
+
+        return YES;
+    }
+
+    /*
+     * Khi thiết bị không ngang, giữ nguyên
+     * logic gốc của BubbleMe.
+     */
+    return originalResult;
 }
 
 static void BMInstallFunctionHook(void)
@@ -209,7 +383,7 @@ static void BMRefreshBubbleOrientation(void)
 
     if ([manager respondsToSelector:applySelector]) {
 
-        ((BOOL (*)(id, SEL))
+        ((void (*)(id, SEL))
             objc_msgSend)(
                 manager,
                 applySelector
