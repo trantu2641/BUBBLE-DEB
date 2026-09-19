@@ -17,7 +17,7 @@ jobs:
 
           brew install ldid xz
 
-          echo "Installing RootHide Theos..."
+          echo "=== Installing RootHide Theos ==="
 
           rm -rf "$HOME/theos"
 
@@ -28,14 +28,30 @@ jobs:
 
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
-          echo "=== THEOS ==="
-          ls -la "$HOME/theos"
+      - name: Update Theos
+        run: |
+          set -e
+
+          export THEOS="$HOME/theos"
+
+          echo "=== Running update-theos ==="
+
+          "$THEOS/bin/update-theos"
+
+          echo "=== Checking vendor ==="
+
+          test -d "$THEOS/vendor/include"
+          test -d "$THEOS/vendor/lib"
+
+          echo "Theos vendor directories OK"
 
       - name: Install iPhoneOS SDK
         run: |
           set -e
 
-          mkdir -p "$HOME/theos/sdks"
+          export THEOS="$HOME/theos"
+
+          mkdir -p "$THEOS/sdks"
 
           rm -rf /tmp/theos-sdks
 
@@ -58,14 +74,14 @@ jobs:
 
           cp -R \
             iPhoneOS16.5.sdk \
-            "$HOME/theos/sdks/"
+            "$THEOS/sdks/"
 
           echo "=== SDK installed ==="
 
           ls -ld \
-            "$HOME/theos/sdks/iPhoneOS16.5.sdk"
+            "$THEOS/sdks/iPhoneOS16.5.sdk"
 
-      - name: Verify build environment
+      - name: Verify Theos environment
         run: |
           set -e
 
@@ -81,13 +97,56 @@ jobs:
 
           echo "SDK OK"
 
-          echo "=== Source ==="
+          echo "=== Vendor include ==="
+
+          test -d \
+            "$THEOS/vendor/include"
+
+          echo "Vendor include OK"
+
+          echo "=== Vendor lib ==="
+
+          test -d \
+            "$THEOS/vendor/lib"
+
+          echo "Vendor lib OK"
+
+          echo "=== RootHide package scheme ==="
+
+          if [ ! -d "$THEOS/makefiles/package" ]; then
+            echo "WARNING: package directory layout differs"
+          fi
+
+          echo "=== Environment check complete ==="
+
+      - name: Verify source
+        run: |
+          set -e
+
+          echo "=== Makefile ==="
 
           test -f Makefile
+
+          echo "Makefile OK"
+
+          echo "=== OrientationFix.m ==="
+
           test -f OrientationFix.m
+
+          echo "OrientationFix.m OK"
+
+          echo "=== RootHide.plist ==="
+
           test -f RootHide.plist
 
-          echo "Source files OK"
+          echo "RootHide.plist OK"
+
+          echo "=== Original BubbleMe ==="
+
+          test -f \
+            package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
+
+          echo "BubbleMe.dylib OK"
 
       - name: Build orientation dylib
         run: |
@@ -102,21 +161,19 @@ jobs:
           echo "=== Building dylib ==="
 
           make \
-            FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME=roothide
+            THEOS_PACKAGE_SCHEME=roothide \
+            FINALPACKAGE=1
 
-          echo "=== Build output ==="
+          echo "=== Build result ==="
 
           find . \
             -type f \
             \( -name '*.dylib' -o -name '*.deb' \) \
             -print
 
-      - name: Find built dylib
+      - name: Find orientation dylib
         run: |
           set -e
-
-          echo "=== Searching dylib ==="
 
           FIX_DYLIB=$(find . \
             -type f \
@@ -126,7 +183,7 @@ jobs:
           if [ -z "$FIX_DYLIB" ]; then
             echo "ERROR: BubbleMeOrientationFix.dylib not found"
 
-            echo "=== All dylibs ==="
+            echo "=== Available dylibs ==="
 
             find . \
               -type f \
@@ -143,7 +200,7 @@ jobs:
 
           cp \
             "$FIX_DYLIB" \
-            "$RUNNER_TEMP/orientation/"
+            "$RUNNER_TEMP/orientation/BubbleMeOrientationFix.dylib"
 
           echo "FIX_DYLIB=$RUNNER_TEMP/orientation/BubbleMeOrientationFix.dylib" \
             >> "$GITHUB_ENV"
@@ -152,21 +209,18 @@ jobs:
         run: |
           set -e
 
-          echo "=== Orientation dylib ==="
+          echo "=== File ==="
 
           file "$FIX_DYLIB"
 
-          ls -lh "$FIX_DYLIB"
-
-          echo "=== Mach-O architecture ==="
+          echo "=== Architecture ==="
 
           xcrun lipo \
             -info "$FIX_DYLIB" || true
 
-          echo "=== Code signature ==="
+          echo "=== Size ==="
 
-          codesign -dvvv \
-            "$FIX_DYLIB" 2>&1 || true
+          ls -lh "$FIX_DYLIB"
 
       - name: Assemble BubbleMe package
         run: |
@@ -185,7 +239,7 @@ jobs:
           mkdir -p \
             "$PKGROOT/Library/PreferenceLoader/Preferences"
 
-          echo "=== Copy original BubbleMe ==="
+          echo "=== Copy BubbleMe ==="
 
           cp \
             package/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib \
@@ -213,14 +267,17 @@ jobs:
             RootHide.plist \
             "$PKGROOT/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist"
 
-          echo "=== Verify package tree ==="
+          echo "=== Package tree ==="
 
           find "$PKGROOT" \
             -type f \
             -print
 
-          echo "=== Create control ==="
+      - name: Create DEB
+        run: |
+          set -e
 
+          PKGROOT="$RUNNER_TEMP/bubbleme-pkg"
           CONTROL="$RUNNER_TEMP/control"
 
           rm -rf "$CONTROL"
@@ -253,13 +310,13 @@ jobs:
             -czf "$RUNNER_TEMP/data.tar.gz" \
             .
 
-          echo "=== Create DEB ==="
-
           ar -cr \
-            "BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb" \
+            BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb \
             "$CONTROL/debian-binary" \
             "$RUNNER_TEMP/control.tar.gz" \
             "$RUNNER_TEMP/data.tar.gz"
+
+          echo "=== DEB created ==="
 
           ls -lh \
             BubbleMe-0.0.2-alpha-1+roothide-orientation1.deb
@@ -274,13 +331,15 @@ jobs:
 
           file "$DEB"
 
-          echo "=== AR MEMBERS ==="
+          echo "=== Members ==="
 
           ar t "$DEB"
 
           rm -rf /tmp/deb-check
+          rm -rf /tmp/deb-final
 
           mkdir -p /tmp/deb-check
+          mkdir -p /tmp/deb-final
 
           ar -x \
             "$DEB" \
@@ -295,36 +354,33 @@ jobs:
             exit 1
           fi
 
-          mkdir -p /tmp/deb-final
-
           tar \
             -xf "$DATA_TAR" \
             -C /tmp/deb-final
 
-          echo "=== Final dynamic libraries ==="
-
-          find \
-            /tmp/deb-final/Library/MobileSubstrate/DynamicLibraries \
-            -type f \
-            -maxdepth 1 \
-            -print
-
-          echo "=== Original BubbleMe ==="
+          echo "=== BubbleMe.dylib ==="
 
           file \
             /tmp/deb-final/Library/MobileSubstrate/DynamicLibraries/BubbleMe.dylib
 
-          echo "=== Orientation fix ==="
+          echo "=== OrientationFix.dylib ==="
 
           file \
             /tmp/deb-final/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.dylib
 
-          echo "=== Orientation plist ==="
+          echo "=== Plists ==="
 
-          cat \
-            /tmp/deb-final/Library/MobileSubstrate/DynamicLibraries/BubbleMeOrientationFix.plist
+          ls -lh \
+            /tmp/deb-final/Library/MobileSubstrate/DynamicLibraries/*.plist
 
-          echo "=== Validation successful ==="
+          echo "=== Preferences ==="
+
+          find \
+            /tmp/deb-final/Library/PreferenceBundles \
+            -type f \
+            -print
+
+          echo "=== FINAL VALIDATION PASSED ==="
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
