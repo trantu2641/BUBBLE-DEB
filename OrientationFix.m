@@ -3,14 +3,6 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-static BOOL BMIsLandscapeInterfaceOrientation(
-    UIInterfaceOrientation orientation
-)
-{
-    return orientation == UIInterfaceOrientationLandscapeLeft ||
-           orientation == UIInterfaceOrientationLandscapeRight;
-}
-
 static UIInterfaceOrientation BMInterfaceOrientationFromDeviceOrientation(
     UIDeviceOrientation orientation
 )
@@ -98,26 +90,6 @@ static void BMInvalidateControllerOrientation(
     }
 }
 
-static void BMRefreshViewController(
-    UIViewController *controller
-)
-{
-    if (controller == nil) {
-        return;
-    }
-
-    BMInvalidateControllerOrientation(controller);
-
-    UIView *view =
-        controller.view;
-
-    if (view != nil) {
-
-        [view setNeedsLayout];
-        [view layoutIfNeeded];
-    }
-}
-
 static void BMRefreshWindow(
     UIWindow *window
 )
@@ -130,7 +102,16 @@ static void BMRefreshWindow(
         window.rootViewController;
 
     if (root != nil) {
-        BMRefreshViewController(root);
+
+        BMInvalidateControllerOrientation(root);
+
+        UIView *view =
+            root.view;
+
+        if (view != nil) {
+            [view setNeedsLayout];
+            [view layoutIfNeeded];
+        }
     }
 
     [window setNeedsLayout];
