@@ -1,368 +1,279 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
+#import <substrate.h>
+#import <dlfcn.h>
 
-static UIInterfaceOrientation BMInterfaceOrientationFromDeviceOrientation(
-    UIDeviceOrientation orientation
-)
+static BOOL BMOrientationFixInstalled = NO;
+
+static BOOL (*BMOriginalBundleNeedsLandscape)(id bundleID) = NULL;
+
+static NSInteger BMCurrentDeviceOrientation(void)
 {
-    switch (orientation) {
+    UIDeviceOrientation orientation =
+        UIDevice.currentDevice.orientation;
 
-        case UIDeviceOrientationLandscapeLeft:
-            return UIInterfaceOrientationLandscapeRight;
-
-        case UIDeviceOrientationLandscapeRight:
-            return UIInterfaceOrientationLandscapeLeft;
-
-        case UIDeviceOrientationPortrait:
-            return UIInterfaceOrientationPortrait;
-
-        case UIDeviceOrientationPortraitUpsideDown:
-            return UIInterfaceOrientationPortraitUpsideDown;
-
-        default:
-            return UIInterfaceOrientationUnknown;
+    if (orientation == UIDeviceOrientationLandscapeLeft) {
+        return UIInterfaceOrientationLandscapeRight;
     }
-}
 
-static UIInterfaceOrientation BMCurrentInterfaceOrientation(void)
-{
+    if (orientation == UIDeviceOrientationLandscapeRight) {
+        return UIInterfaceOrientationLandscapeLeft;
+    }
+
+    if (orientation == UIDeviceOrientationPortrait) {
+        return UIInterfaceOrientationPortrait;
+    }
+
+    if (orientation == UIDeviceOrientationPortraitUpsideDown) {
+        return UIInterfaceOrientationPortraitUpsideDown;
+    }
+
     UIApplication *application =
         UIApplication.sharedApplication;
 
-    if (application == nil) {
-        return UIInterfaceOrientationUnknown;
+    if (application != nil) {
+
+        NSSet *scenes =
+            application.connectedScenes;
+
+        for (UIScene *scene in scenes) {
+
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+
+            UIWindowScene *windowScene =
+                (UIWindowScene *)scene;
+
+            UIInterfaceOrientation orientation2 =
+                windowScene.interfaceOrientation;
+
+            if (orientation2 !=
+                UIInterfaceOrientationUnknown) {
+
+                return orientation2;
+            }
+        }
     }
 
-    NSSet *scenes =
-        application.connectedScenes;
-
-    for (UIScene *scene in scenes) {
-
-        if (![scene isKindOfClass:[UIWindowScene class]]) {
-            continue;
-        }
-
-        UIWindowScene *windowScene =
-            (UIWindowScene *)scene;
-
-        UIInterfaceOrientation orientation =
-            windowScene.interfaceOrientation;
-
-        if (orientation != UIInterfaceOrientationUnknown) {
-            return orientation;
-        }
-    }
-
-    return UIInterfaceOrientationUnknown;
+    return UIInterfaceOrientationPortrait;
 }
 
-static BOOL BMIsSpringBoardProcess(void)
+static BOOL BMIsLandscapeNow(void)
+{
+    NSInteger orientation =
+        BMCurrentDeviceOrientation();
+
+    return orientation ==
+               UIInterfaceOrientationLandscapeLeft ||
+           orientation ==
+               UIInterfaceOrientationLandscapeRight;
+}
+
+static BOOL BMHookedBundleNeedsLandscape(
+    id bundleID
+)
+{
+    BOOL landscape =
+        BMIsLandscapeNow();
+
+    if (landscape) {
+
+        return YES;
+    }
+
+    if (BMOriginalBundleNeedsLandscape != NULL) {
+
+        return BMOriginalBundleNeedsLandscape(
+            bundleID
+        );
+    }
+
+    return NO;
+}
+
+static BOOL BMIsSpringBoard(void)
 {
     NSString *identifier =
         NSBundle.mainBundle.bundleIdentifier;
+
+    if (identifier == nil) {
+        return NO;
+    }
 
     return [identifier isEqualToString:
             @"com.apple.springboard"];
 }
 
-static void BMInvalidateControllerOrientation(
-    UIViewController *controller
-)
+static void BMInstallFunctionHook(void)
 {
-    if (controller == nil) {
+    if (BMOrientationFixInstalled) {
         return;
     }
 
-    SEL selector =
-        NSSelectorFromString(
-            @"setNeedsUpdateOfSupportedInterfaceOrientations"
+    void *symbol =
+        MSFindSymbol(
+            NULL,
+            "_BMBundleNeedsLandscapeMiniPhone"
         );
 
-    if ([controller respondsToSelector:selector]) {
+    if (symbol == NULL) {
+
+        void *handle =
+            dlopen(
+                NULL,
+                RTLD_NOW
+            );
+
+        if (handle != NULL) {
+
+            symbol =
+                dlsym(
+                    handle,
+                    "_BMBundleNeedsLandscapeMiniPhone"
+                );
+        }
+    }
+
+    if (symbol == NULL) {
+        return;
+    }
+
+    MSHookFunction(
+        symbol,
+        (void *)BMHookedBundleNeedsLandscape,
+        (void **)&BMOriginalBundleNeedsLandscape
+    );
+
+    if (BMOriginalBundleNeedsLandscape != NULL) {
+
+        BMOrientationFixInstalled = YES;
+    }
+}
+
+static void BMRefreshBubbleOrientation(void)
+{
+    Class managerClass =
+        objc_getClass("BMBubbleManager");
+
+    if (managerClass == Nil) {
+        return;
+    }
+
+    id manager = nil;
+
+    SEL sharedSelector =
+        NSSelectorFromString(
+            @"sharedManager"
+        );
+
+    if ([managerClass
+         respondsToSelector:sharedSelector]) {
+
+        manager =
+            ((id (*)(id, SEL))
+                objc_msgSend)(
+                    managerClass,
+                    sharedSelector
+                );
+    }
+
+    if (manager == nil) {
+
+        SEL sharedInstanceSelector =
+            NSSelectorFromString(
+                @"sharedInstance"
+            );
+
+        if ([managerClass
+             respondsToSelector:sharedInstanceSelector]) {
+
+            manager =
+                ((id (*)(id, SEL))
+                    objc_msgSend)(
+                        managerClass,
+                        sharedInstanceSelector
+                    );
+        }
+    }
+
+    if (manager == nil) {
+        return;
+    }
+
+    SEL applySelector =
+        NSSelectorFromString(
+            @"bm_applyChromeForCurrentOrientation"
+        );
+
+    if ([manager respondsToSelector:applySelector]) {
+
+        ((BOOL (*)(id, SEL))
+            objc_msgSend)(
+                manager,
+                applySelector
+            );
+    }
+
+    SEL refreshSelector =
+        NSSelectorFromString(
+            @"bm_refreshLiveContentHostView"
+        );
+
+    if ([manager respondsToSelector:refreshSelector]) {
 
         ((void (*)(id, SEL))
             objc_msgSend)(
-                controller,
-                selector
+                manager,
+                refreshSelector
             );
     }
 }
 
-static void BMRefreshWindow(
-    UIWindow *window
-)
-{
-    if (window == nil) {
-        return;
-    }
-
-    UIViewController *root =
-        window.rootViewController;
-
-    if (root != nil) {
-
-        BMInvalidateControllerOrientation(root);
-
-        UIView *view =
-            root.view;
-
-        if (view != nil) {
-            [view setNeedsLayout];
-            [view layoutIfNeeded];
-        }
-    }
-
-    [window setNeedsLayout];
-    [window layoutIfNeeded];
-}
-
-static void BMRequestSceneOrientation(
-    UIWindowScene *windowScene,
-    UIInterfaceOrientation orientation
-)
-{
-    if (windowScene == nil) {
-        return;
-    }
-
-    if (@available(iOS 16.0, *)) {
-
-        UIInterfaceOrientationMask mask;
-
-        switch (orientation) {
-
-            case UIInterfaceOrientationLandscapeLeft:
-                mask =
-                    UIInterfaceOrientationMaskLandscapeLeft;
-                break;
-
-            case UIInterfaceOrientationLandscapeRight:
-                mask =
-                    UIInterfaceOrientationMaskLandscapeRight;
-                break;
-
-            case UIInterfaceOrientationPortraitUpsideDown:
-                mask =
-                    UIInterfaceOrientationMaskPortraitUpsideDown;
-                break;
-
-            case UIInterfaceOrientationPortrait:
-            default:
-                mask =
-                    UIInterfaceOrientationMaskPortrait;
-                break;
-        }
-
-        Class preferencesClass =
-            NSClassFromString(
-                @"UIWindowSceneGeometryPreferencesIOS"
-            );
-
-        if (preferencesClass == Nil) {
-            return;
-        }
-
-        SEL initSelector =
-            NSSelectorFromString(
-                @"initWithInterfaceOrientations:"
-            );
-
-        if (![preferencesClass
-              instancesRespondToSelector:initSelector]) {
-            return;
-        }
-
-        id preferences =
-            ((id (*)(id, SEL, UIInterfaceOrientationMask))
-                objc_msgSend)(
-                    [preferencesClass alloc],
-                    initSelector,
-                    mask
-                );
-
-        if (preferences == nil) {
-            return;
-        }
-
-        SEL requestSelector =
-            NSSelectorFromString(
-                @"requestGeometryUpdateWithPreferences:errorHandler:"
-            );
-
-        if (![windowScene
-              respondsToSelector:requestSelector]) {
-            return;
-        }
-
-        void (^errorHandler)(NSError *) =
-            ^(__unused NSError *error) {
-            };
-
-        ((void (*)(id, SEL, id, id))
-            objc_msgSend)(
-                windowScene,
-                requestSelector,
-                preferences,
-                errorHandler
-            );
-    }
-}
-
-static void BMUpdateAllScenes(
-    UIInterfaceOrientation orientation
-)
-{
-    UIApplication *application =
-        UIApplication.sharedApplication;
-
-    if (application == nil) {
-        return;
-    }
-
-    NSSet *scenes =
-        application.connectedScenes;
-
-    for (UIScene *scene in scenes) {
-
-        if (![scene isKindOfClass:[UIWindowScene class]]) {
-            continue;
-        }
-
-        UIWindowScene *windowScene =
-            (UIWindowScene *)scene;
-
-        UISceneActivationState state =
-            windowScene.activationState;
-
-        if (state ==
-            UISceneActivationStateUnattached) {
-            continue;
-        }
-
-        NSArray *windows =
-            windowScene.windows;
-
-        for (UIWindow *window in windows) {
-
-            if (window == nil) {
-                continue;
-            }
-
-            if (window.hidden) {
-                continue;
-            }
-
-            BMRefreshWindow(window);
-        }
-
-        BMRequestSceneOrientation(
-            windowScene,
-            orientation
-        );
-    }
-}
-
-static void BMForceOrientation(void)
+static void BMOrientationChanged(void)
 {
     dispatch_async(
         dispatch_get_main_queue(),
         ^{
             @autoreleasepool {
 
-                UIDeviceOrientation deviceOrientation =
-                    UIDevice.currentDevice.orientation;
+                BMInstallFunctionHook();
 
-                UIInterfaceOrientation orientation =
-                    BMInterfaceOrientationFromDeviceOrientation(
-                        deviceOrientation
-                    );
+                BMRefreshBubbleOrientation();
 
-                if (orientation ==
-                    UIInterfaceOrientationUnknown) {
+                dispatch_after(
+                    dispatch_time(
+                        DISPATCH_TIME_NOW,
+                        (int64_t)(
+                            0.15 *
+                            NSEC_PER_SEC
+                        )
+                    ),
+                    dispatch_get_main_queue(),
+                    ^{
+                        BMInstallFunctionHook();
+                        BMRefreshBubbleOrientation();
+                    }
+                );
 
-                    orientation =
-                        BMCurrentInterfaceOrientation();
-                }
-
-                if (orientation ==
-                    UIInterfaceOrientationUnknown) {
-                    return;
-                }
-
-                BMUpdateAllScenes(
-                    orientation
+                dispatch_after(
+                    dispatch_time(
+                        DISPATCH_TIME_NOW,
+                        (int64_t)(
+                            0.40 *
+                            NSEC_PER_SEC
+                        )
+                    ),
+                    dispatch_get_main_queue(),
+                    ^{
+                        BMInstallFunctionHook();
+                        BMRefreshBubbleOrientation();
+                    }
                 );
             }
         }
     );
-}
-
-static void BMForceOrientationDelayed(void)
-{
-    BMForceOrientation();
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(0.15 * NSEC_PER_SEC)
-        ),
-        dispatch_get_main_queue(),
-        ^{
-            BMForceOrientation();
-        }
-    );
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(0.40 * NSEC_PER_SEC)
-        ),
-        dispatch_get_main_queue(),
-        ^{
-            BMForceOrientation();
-        }
-    );
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(0.80 * NSEC_PER_SEC)
-        ),
-        dispatch_get_main_queue(),
-        ^{
-            BMForceOrientation();
-        }
-    );
-}
-
-static void BMDeviceOrientationChanged(
-    __unused NSNotification *notification
-)
-{
-    BMForceOrientationDelayed();
-}
-
-static void BMSceneActivated(
-    __unused NSNotification *notification
-)
-{
-    BMForceOrientationDelayed();
-}
-
-static void BMWindowVisible(
-    __unused NSNotification *notification
-)
-{
-    BMForceOrientationDelayed();
-}
-
-static void BMApplicationActive(
-    __unused NSNotification *notification
-)
-{
-    BMForceOrientationDelayed();
 }
 
 static void BMInstallNotifications(void)
@@ -381,7 +292,7 @@ static void BMInstallNotifications(void)
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMDeviceOrientationChanged(notification);
+        BMOrientationChanged();
     }];
 
     [center addObserverForName:
@@ -391,17 +302,17 @@ static void BMInstallNotifications(void)
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMSceneActivated(notification);
+        BMOrientationChanged();
     }];
 
     [center addObserverForName:
-                UIWindowDidBecomeVisibleNotification
+                UISceneWillDeactivateNotification
                 object:nil
                 queue:[NSOperationQueue mainQueue]
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMWindowVisible(notification);
+        BMOrientationChanged();
     }];
 
     [center addObserverForName:
@@ -411,7 +322,7 @@ static void BMInstallNotifications(void)
                 usingBlock:
         ^(__unused NSNotification *notification) {
 
-        BMApplicationActive(notification);
+        BMOrientationChanged();
     }];
 }
 
@@ -420,16 +331,33 @@ static void BubbleMeOrientationFixInit(void)
 {
     @autoreleasepool {
 
-        if (!BMIsSpringBoardProcess()) {
+        if (!BMIsSpringBoard()) {
             return;
         }
+
+        BMInstallFunctionHook();
 
         BMInstallNotifications();
 
         dispatch_async(
             dispatch_get_main_queue(),
             ^{
-                BMForceOrientation();
+                BMInstallFunctionHook();
+                BMRefreshBubbleOrientation();
+            }
+        );
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(
+                    1.0 *
+                    NSEC_PER_SEC
+                )
+            ),
+            dispatch_get_main_queue(),
+            ^{
+                BMInstallFunctionHook();
             }
         );
     }
